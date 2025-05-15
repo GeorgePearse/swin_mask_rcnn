@@ -22,6 +22,16 @@ train-maskrcnn \
     --num-epochs 12
 ```
 
+Or use the training script directly:
+
+```bash
+python scripts/train_simple.py \
+    --train-ann /path/to/annotations/instances_train2017.json \
+    --val-ann /path/to/annotations/instances_val2017.json \
+    --batch-size 2 \
+    --num-epochs 12
+```
+
 The script will automatically locate the image directories based on the annotation paths. If your images are in a different location, use `--images-root`:
 
 ```bash
@@ -66,7 +76,7 @@ Run inference on images and visualize results in FiftyOne:
 
 ```bash
 # Run inference from command line
-python inference.py \
+python scripts/inference.py \
     --model-path /path/to/checkpoint.pth \
     --images /path/to/image1.jpg /path/to/image2.jpg \
     --score-threshold 0.5 \
