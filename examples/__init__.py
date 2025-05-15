@@ -1,0 +1,1 @@
+"""Example scripts for SWIN Mask R-CNN."""
