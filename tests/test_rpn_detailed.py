@@ -24,12 +24,16 @@ def test_rpn_loss():
     img_shapes = [(800, 800), (800, 800)]
     
     # Initialize RPN
+    from swin_maskrcnn.models.rpn import AnchorGenerator
+    anchor_generator = AnchorGenerator(
+        strides=[8, 16, 32],
+        ratios=[0.5, 1.0, 2.0],
+        scales=[8]
+    )
     rpn = RPNHead(
         in_channels=256,
         feat_channels=256,
-        anchor_scales=[8],
-        anchor_ratios=[0.5, 1.0, 2.0],
-        anchor_strides=[8, 16, 32]
+        anchor_generator=anchor_generator
     )
     
     # Forward pass
@@ -40,26 +44,20 @@ def test_rpn_loss():
     print("bbox_preds shapes:", [b.shape for b in bbox_preds])
     
     # Generate anchors for debugging
-    anchors = rpn.anchor_generator(
-        featmap_sizes=[feat.shape[-2:] for feat in features],
-        img_shapes=img_shapes,
-        device=device
-    )
+    featmap_sizes = [feat.shape[-2:] for feat in features]
+    anchors = rpn.get_anchors(featmap_sizes, device)
     
     print("\nAnchors structure:")
-    print(f"Number of images: {len(anchors)}")
-    print(f"Number of levels per image: {len(anchors[0])}")
-    for img_idx, img_anchors in enumerate(anchors):
-        print(f"Image {img_idx}:")
-        for level_idx, level_anchors in enumerate(img_anchors):
-            print(f"  Level {level_idx}: shape={level_anchors.shape}")
+    print(f"Number of levels: {len(anchors)}")
+    for level_idx, level_anchors in enumerate(anchors):
+        print(f"  Level {level_idx}: shape={level_anchors.shape}")
     
     # Try to reproduce the error
     print("\nTesting IoU computation in loss function:")
     
     for img_idx, gt_bbox in enumerate(gt_bboxes):
         print(f"\nImage {img_idx}: gt_bbox shape={gt_bbox.shape}")
-        for level_idx, level_anchors in enumerate(anchors[img_idx]):
+        for level_idx, level_anchors in enumerate(anchors):
             print(f"  Level {level_idx}: anchor shape={level_anchors.shape}")
             try:
                 ious = box_iou(level_anchors, gt_bbox)

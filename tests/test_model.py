@@ -126,9 +126,12 @@ def test_roi_head():
     with torch.no_grad():
         results = roi_head(features, proposals)
     
-    assert 'boxes' in results, "Missing boxes in results"
-    assert 'labels' in results, "Missing labels in results"
-    assert 'scores' in results, "Missing scores in results"
+    assert isinstance(results, list), "Results should be a list"
+    assert len(results) == 2, "Should have results for both images"
+    for result in results:
+        assert 'boxes' in result, "Missing boxes in results"
+        assert 'labels' in result, "Missing labels in results"
+        assert 'scores' in result, "Missing scores in results"
     
     print("✓ ROI head test passed!")
 
@@ -170,10 +173,14 @@ def test_full_model():
     with torch.no_grad():
         predictions = model(images)
     
-    assert isinstance(predictions, dict), "Predictions should be a dictionary"
-    assert 'boxes' in predictions, "Missing boxes in predictions"
-    assert 'labels' in predictions, "Missing labels in predictions"
-    assert 'scores' in predictions, "Missing scores in predictions"
+    assert isinstance(predictions, list), "Predictions should be a list"
+    assert len(predictions) == batch_size, f"Should have {batch_size} predictions"
+    for pred in predictions:
+        assert isinstance(pred, dict), "Each prediction should be a dictionary"
+        assert 'boxes' in pred, "Missing boxes in predictions"
+        assert 'labels' in pred, "Missing labels in predictions"
+        assert 'scores' in pred, "Missing scores in predictions"
+        assert 'masks' in pred, "Missing masks in predictions"
     
     print("✓ Full model test passed!")
 

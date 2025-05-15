@@ -466,29 +466,35 @@ class StandardRoIHead(nn.Module):
         # Get predicted classes and scores
         scores, pred_labels = cls_probs.max(dim=1)
         
+        # Track number of proposals per image for proper splitting
+        proposal_splits = [len(p) for p in proposals]
+        
         # Convert proposals to single tensor if it's a list
         if isinstance(proposals, list):
-            proposals = torch.cat(proposals)
+            proposals_cat = torch.cat(proposals)
+        else:
+            proposals_cat = proposals
+            proposals = [proposals]  # Make it a list for consistency
         
-        # Filter out background predictions
+        # Filter out background predictions on concatenated tensors
         keep = pred_labels > 0
-        scores = scores[keep]
-        pred_labels = pred_labels[keep]
-        proposals = proposals[keep]
-        bbox_preds = bbox_preds[keep]
+        scores_filtered = scores[keep]
+        pred_labels_filtered = pred_labels[keep]
+        proposals_filtered = proposals_cat[keep]
+        bbox_preds_filtered = bbox_preds[keep]
         
         # Decode bbox predictions
-        if len(proposals) > 0:
-            bbox_preds = bbox_preds.reshape(len(proposals), -1, 4)
-            bbox_preds = bbox_preds[torch.arange(len(proposals)), pred_labels - 1]
+        if len(proposals_filtered) > 0:
+            bbox_preds_filtered = bbox_preds_filtered.reshape(len(proposals_filtered), -1, 4)
+            bbox_preds_filtered = bbox_preds_filtered[torch.arange(len(proposals_filtered)), pred_labels_filtered - 1]
             
             # Apply deltas to proposals
-            px = (proposals[:, 0] + proposals[:, 2]) * 0.5
-            py = (proposals[:, 1] + proposals[:, 3]) * 0.5
-            pw = proposals[:, 2] - proposals[:, 0]
-            ph = proposals[:, 3] - proposals[:, 1]
+            px = (proposals_filtered[:, 0] + proposals_filtered[:, 2]) * 0.5
+            py = (proposals_filtered[:, 1] + proposals_filtered[:, 3]) * 0.5
+            pw = proposals_filtered[:, 2] - proposals_filtered[:, 0]
+            ph = proposals_filtered[:, 3] - proposals_filtered[:, 1]
             
-            dx, dy, dw, dh = bbox_preds.unbind(dim=1)
+            dx, dy, dw, dh = bbox_preds_filtered.unbind(dim=1)
             
             gx = dx * pw + px
             gy = dy * ph + py
@@ -502,19 +508,54 @@ class StandardRoIHead(nn.Module):
             
             refined_bboxes = torch.stack([x1, y1, x2, y2], dim=1)
         else:
-            refined_bboxes = proposals
+            refined_bboxes = proposals_filtered
         
         # Process mask predictions
         if mask_preds is not None and len(pos_labels) > 0:
             # Get mask predictions for positive samples
-            mask_preds = mask_preds[torch.arange(len(pos_labels)), pos_labels - 1]
-            mask_probs = torch.sigmoid(mask_preds)
+            mask_preds_filtered = mask_preds[torch.arange(len(pos_labels)), pos_labels - 1]
+            mask_probs = torch.sigmoid(mask_preds_filtered)
         else:
             mask_probs = None
         
-        return {
-            'boxes': refined_bboxes,
-            'labels': pred_labels,
-            'scores': scores,
-            'masks': mask_probs
-        }
+        # Split results back into per-image dictionaries
+        results = []
+        
+        # Calculate starting indices for each image's proposals
+        cumsum = torch.cumsum(torch.tensor([0] + proposal_splits), dim=0)
+        
+        # For each image
+        for i in range(len(proposal_splits)):
+            # Find which filtered detections belong to this image
+            # Map filtered indices back to original proposal indices
+            
+            # First, create mapping from original to filtered indices
+            keep_indices = torch.where(keep)[0]
+            
+            # Find which keep indices fall within this image's proposal range
+            image_mask = (keep_indices >= cumsum[i]) & (keep_indices < cumsum[i+1])
+            
+            image_indices = torch.where(image_mask)[0]
+            
+            # Extract detections for this image
+            if len(image_indices) > 0:
+                image_boxes = refined_bboxes[image_indices]
+                image_labels = pred_labels_filtered[image_indices]
+                image_scores = scores_filtered[image_indices]
+                image_masks = mask_probs[image_indices] if mask_probs is not None else None
+            else:
+                # No detections for this image
+                device = proposals[0].device
+                image_boxes = torch.empty((0, 4), device=device)
+                image_labels = torch.empty((0,), dtype=torch.int64, device=device)
+                image_scores = torch.empty((0,), device=device)
+                image_masks = None
+            
+            results.append({
+                'boxes': image_boxes,
+                'labels': image_labels,
+                'scores': image_scores,
+                'masks': image_masks
+            })
+        
+        return results

@@ -146,8 +146,7 @@ class SwinMaskRCNN(nn.Module):
             roi_losses = self.roi_head(features, proposals, targets)
             losses = {}
             if rpn_losses:
-                for k, v in rpn_losses.items():
-                    losses[f'rpn_{k}'] = v
+                losses.update(rpn_losses)
             if roi_losses:
                 for k, v in roi_losses.items():
                     losses[f'roi_{k}'] = v
