@@ -34,7 +34,7 @@ class TrainingConfig(BaseModel):
     
     # Iteration-based validation
     steps_per_validation: int = Field(
-        default=5,
+        default=200,
         description="Number of training steps between validation runs"
     )
     

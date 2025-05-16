@@ -166,6 +166,10 @@ class IterationBasedTrainer:
                 if num_preds > 0:
                     pbar.set_description(f"Evaluating (image {image_id}, {num_preds} detections)")
                 
+                # Skip if no predictions or no masks
+                if output['masks'] is None:
+                    continue
+                    
                 # Convert predictions to COCO format
                 for j, (box, label, score, mask) in enumerate(zip(
                     output['boxes'].cpu().numpy(),
@@ -405,12 +409,19 @@ class IterationBasedTrainer:
 
 def main(config_path: Optional[str] = None):
     # Load configuration
+    if config_path is None:
+        # Default to config.yaml in the same directory as this script
+        default_config = Path(__file__).parent / "config" / "config.yaml"
+        if default_config.exists():
+            config_path = str(default_config)
+    
     if config_path:
         import yaml
         with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         config = TrainingConfig(**config_dict)
     else:
+        # Fallback to default values from TrainingConfig
         config = TrainingConfig()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -475,7 +486,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Train SWIN Mask R-CNN')
     parser.add_argument('--config', type=str, default=None,
-                        help='Path to YAML config file')
+                        help='Path to YAML config file (defaults to scripts/config/config.yaml)')
     args = parser.parse_args()
     
     main(config_path=args.config)
