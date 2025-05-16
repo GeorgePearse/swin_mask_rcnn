@@ -1,0 +1,42 @@
+# Configuration for quick testing
+# Dataset
+data_root: '/home/georgepearse/data'
+train_annotation_file: '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json'
+val_annotation_file: '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json'
+img_dir: '/home/georgepearse/data/images'
+num_classes: 69
+
+# Model
+pretrained_backbone: true
+pretrained_checkpoint_url: ''
+frozen_backbone_stages: -1
+
+# Training
+optimizer: 'sgd'  
+sgd_lr: 0.01
+adam_lr: 0.0001
+sgd_momentum: 0.9
+weight_decay: 0.0001
+warmup_steps: 1000
+batch_size: 2
+num_workers: 4
+precision: 32
+device: 'cuda'
+seed: 42
+
+# Training iterations
+max_iterations: 200
+val_interval: 50
+log_interval: 10
+checkpoint_interval: 50
+
+# Losses
+loss_rpn_cls_weight: 1.0
+loss_rpn_bbox_weight: 1.0
+loss_roi_cls_weight: 1.0
+loss_roi_bbox_weight: 1.0
+loss_roi_mask_weight: 1.0
+
+# Output
+work_dir: './test_checkpoints'
+experiment_name: 'quick_test'

@@ -188,7 +188,7 @@ def get_train_transforms(img_size=800):
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc', 
-        label_fields=['category_ids'],
+        label_fields=['labels'],
         min_visibility=0.1
     ))
 
@@ -201,7 +201,7 @@ def get_val_transforms(img_size=800):
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc', 
-        label_fields=['category_ids']
+        label_fields=['labels']
     ))
 
 
