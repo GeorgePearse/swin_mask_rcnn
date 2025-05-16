@@ -149,7 +149,23 @@ class IterationBasedTrainer:
         
         # Forward pass
         loss_dict = self.model(images, targets)
-        total_loss = sum(loss_dict.values())
+        
+        # Apply loss weights (similar to MMDetection)
+        loss_weights = {
+            'rpn_cls_loss': 1.0,
+            'rpn_bbox_loss': 1.0,
+            'roi_cls_loss': 1.0,
+            'roi_bbox_loss': 1.0,
+            'roi_mask_loss': 1.0,
+        }
+        
+        # Weight the losses
+        weighted_losses = {}
+        for k, v in loss_dict.items():
+            weight = loss_weights.get(k, 1.0)
+            weighted_losses[k] = v * weight
+        
+        total_loss = sum(weighted_losses.values())
         
         # Backward pass
         self.optimizer.zero_grad()

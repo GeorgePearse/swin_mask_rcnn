@@ -97,7 +97,9 @@ class RPNHead(nn.Module):
         nn.init.normal_(self.rpn_cls.weight, std=0.01)
         nn.init.normal_(self.rpn_reg.weight, std=0.01)
         nn.init.constant_(self.rpn_conv.bias, 0)
-        nn.init.constant_(self.rpn_cls.bias, 0)
+        # Initialize cls bias to predict background with high probability
+        # log(0.99 / 0.01) = -4.59 means initial prediction will be ~0.01 foreground
+        nn.init.constant_(self.rpn_cls.bias, -4.59)
         nn.init.constant_(self.rpn_reg.bias, 0)
         
     def forward(self, features):
@@ -212,7 +214,7 @@ class RPNHead(nn.Module):
                     # Only calculate loss for valid targets (exclude -1)
                     valid_mask = targets >= 0
                     if valid_mask.any():
-                        loss = loss + self.loss_cls(scores[valid_mask], targets[valid_mask].float()).sum()
+                        loss = loss + self.loss_cls(scores[valid_mask], targets[valid_mask].float()).mean()
         return loss
     
     def _bbox_loss(self, bbox_preds, bbox_targets, pos_indices):
@@ -238,7 +240,7 @@ class RPNHead(nn.Module):
                     if targets.numel() > 0 and indices.numel() > 0:
                         # Index predictions at positive anchor locations
                         pos_preds = preds[indices]
-                        loss = loss + self.loss_bbox(pos_preds, targets).sum()
+                        loss = loss + self.loss_bbox(pos_preds, targets).mean()
         return loss
     
     def encode_bbox(self, anchors, gt_bboxes):

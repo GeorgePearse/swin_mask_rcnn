@@ -39,7 +39,10 @@ class BBoxHead(nn.Module):
         nn.init.xavier_uniform_(self.fc_reg.weight)
         nn.init.constant_(self.shared_fc1.bias, 0)
         nn.init.constant_(self.shared_fc2.bias, 0)
+        # Initialize classification bias to favor background class
+        # This helps stabilize initial training
         nn.init.constant_(self.fc_cls.bias, 0)
+        self.fc_cls.bias.data[0] = 2.0  # Favor background class
         nn.init.constant_(self.fc_reg.bias, 0)
         
     def forward(self, roi_feats):

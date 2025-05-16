@@ -452,6 +452,7 @@ class SwinTransformer(nn.Module):
             self.norms.append(layer)
             
         self._freeze_stages()
+        self._init_weights()
         
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -468,6 +469,21 @@ class SwinTransformer(nn.Module):
                 m.eval()
                 for param in m.parameters():
                     param.requires_grad = False
+    
+    def _init_weights(self):
+        """Initialize weights similar to MMDetection's implementation."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
                     
     def forward(self, x):
         B, C, H_img, W_img = x.shape

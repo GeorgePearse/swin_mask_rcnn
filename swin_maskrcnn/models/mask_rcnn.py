@@ -52,7 +52,7 @@ class SwinMaskRCNN(nn.Module):
             qk_scale=None,
             drop_rate=0.,
             attn_drop_rate=0.,
-            drop_path_rate=0.2,
+            drop_path_rate=0.1,
             patch_norm=True,
             out_indices=(0, 1, 2, 3),
             frozen_stages=stages_to_freeze,
