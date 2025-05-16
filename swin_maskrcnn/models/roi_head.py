@@ -296,6 +296,25 @@ class StandardRoIHead(nn.Module):
             gt_labels = img_targets['labels']
             gt_masks = img_targets.get('masks')
             
+            # Handle empty ground truth case
+            if len(gt_bboxes) == 0:
+                # All proposals become negative samples
+                labels = torch.zeros(len(img_proposals), dtype=torch.long, device=img_proposals.device)
+                
+                # Sample negative proposals
+                neg_inds = torch.arange(len(img_proposals), device=img_proposals.device)
+                if len(neg_inds) > self.num_samples:
+                    neg_inds = neg_inds[torch.randperm(len(neg_inds))[:self.num_samples]]
+                
+                sampled_proposals.append(img_proposals[neg_inds])
+                sampled_labels.append(labels[neg_inds])
+                sampled_bbox_targets.append(torch.zeros((len(neg_inds), 4), device=img_proposals.device))
+                
+                if gt_masks is not None:
+                    sampled_mask_targets.append(torch.zeros((len(neg_inds), 14, 14), device=img_proposals.device))
+                
+                continue
+            
             # Calculate IoU between proposals and ground truth
             ious = box_iou(img_proposals, gt_bboxes)
             max_ious, matched_gt_idxs = ious.max(dim=1)
@@ -430,28 +449,35 @@ class StandardRoIHead(nn.Module):
         # Bbox regression loss
         if len(bbox_targets) > 0 and any(len(t) > 0 for t in bbox_targets):
             pos_inds = all_labels > 0
-            pos_bbox_preds = bbox_preds[pos_inds]
-            pos_labels = all_labels[pos_inds]
-            
-            # Select predictions for corresponding classes
-            pos_bbox_preds = pos_bbox_preds.reshape(len(pos_labels), -1, 4)
-            pos_bbox_preds = pos_bbox_preds[torch.arange(len(pos_labels)), pos_labels - 1]
-            
-            bbox_targets = torch.cat(bbox_targets)
-            bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets)
+            if pos_inds.any():
+                pos_bbox_preds = bbox_preds[pos_inds]
+                pos_labels = all_labels[pos_inds]
+                
+                # Select predictions for corresponding classes
+                pos_bbox_preds = pos_bbox_preds.reshape(len(pos_labels), -1, 4)
+                pos_bbox_preds = pos_bbox_preds[torch.arange(len(pos_labels)), pos_labels - 1]
+                
+                bbox_targets = torch.cat(bbox_targets)
+                bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets)
+            else:
+                bbox_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
             bbox_loss = torch.tensor(0.0, device=cls_scores.device)
         losses['bbox_loss'] = bbox_loss
         
         # Mask loss
         if mask_preds is not None and len(mask_targets) > 0:
-            pos_labels = torch.cat([lbls[lbls > 0] for lbls in labels])
-            mask_targets = torch.cat(mask_targets)
-            
-            # Select predictions for corresponding classes
-            mask_preds = mask_preds[torch.arange(len(pos_labels)), pos_labels - 1]
-            
-            mask_loss = F.binary_cross_entropy_with_logits(mask_preds, mask_targets)
+            pos_labels_list = [lbls[lbls > 0] for lbls in labels]
+            if any(len(lbls) > 0 for lbls in pos_labels_list):
+                pos_labels = torch.cat(pos_labels_list)
+                mask_targets = torch.cat(mask_targets)
+                
+                # Select predictions for corresponding classes
+                mask_preds = mask_preds[torch.arange(len(pos_labels)), pos_labels - 1]
+                
+                mask_loss = F.binary_cross_entropy_with_logits(mask_preds, mask_targets)
+            else:
+                mask_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
             mask_loss = torch.tensor(0.0, device=cls_scores.device)
         losses['mask_loss'] = mask_loss

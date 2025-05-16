@@ -116,11 +116,8 @@ class SwinMaskRCNN(nn.Module):
                 [(img.shape[-2], img.shape[-1]) for img in images],
                 {'nms_pre': 2000, 'nms_thr': 0.7, 'max_per_img': 1000}
             )
-            # Debug what's being passed to RPN
+            # Get ground truth bboxes for RPN
             gt_bboxes = [t['boxes'] for t in targets]
-            print(f"Passing {len(gt_bboxes)} gt_bboxes to RPN loss")
-            for i, gt in enumerate(gt_bboxes):
-                print(f"  gt_bbox {i}: shape={gt.shape}")
             
             rpn_losses_raw = self.rpn_head.loss(
                 rpn_cls_scores, rpn_bbox_preds,

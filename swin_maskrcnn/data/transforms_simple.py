@@ -7,8 +7,7 @@ def get_transform_simple(train=True):
     if train:
         return A.Compose([
             A.RandomResizedCrop(
-                height=512,
-                width=512,
+                size=(512, 512),
                 scale=(0.8, 1.0),
                 ratio=(0.75, 1.33)
             ),
@@ -18,10 +17,10 @@ def get_transform_simple(train=True):
                 contrast_limit=0.2,
                 p=0.5
             ),
-            A.ShiftScaleRotate(
-                shift_limit=0.1,
-                scale_limit=0.1,
-                rotate_limit=15,
+            A.Affine(
+                translate_percent={'x': (-0.1, 0.1), 'y': (-0.1, 0.1)},
+                scale=(0.9, 1.1),
+                rotate=(-15, 15),
                 p=0.5
             ),
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))

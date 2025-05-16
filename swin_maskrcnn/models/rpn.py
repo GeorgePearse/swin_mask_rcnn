@@ -133,12 +133,6 @@ class RPNHead(nn.Module):
         featmap_sizes = [score.shape[-2:] for score in cls_scores]
         anchors = self.get_anchors(featmap_sizes, device)
         
-        # Debug prints for input shapes
-        print(f"Number of gt_bboxes: {len(gt_bboxes)}")
-        print(f"Number of levels in cls_scores: {len(cls_scores)}")
-        print(f"Batch size from cls_scores: {cls_scores[0].shape[0]}")
-        print(f"Type of anchors: {type(anchors)}, length: {len(anchors) if isinstance(anchors, list) else 'N/A'}")
-        
         # Match anchors to ground truth
         cls_targets = []
         bbox_targets = []
@@ -148,9 +142,6 @@ class RPNHead(nn.Module):
             img_cls_targets = []
             img_bbox_targets = []
             img_pos_indices = []
-            
-            # Debug print
-            print(f"Processing image {img_idx}: gt_bbox shape={gt_bbox.shape if torch.is_tensor(gt_bbox) else type(gt_bbox)}")
             
             # Handle empty ground truth boxes
             if len(gt_bbox) == 0:
@@ -168,7 +159,6 @@ class RPNHead(nn.Module):
             
             for level_idx, level_anchors in enumerate(anchors):
                 # Calculate IoU between anchors and ground truth
-                print(f"  Level {level_idx}: anchors shape={level_anchors.shape}, gt_bbox shape={gt_bbox.shape}")
                 ious = box_iou(level_anchors, gt_bbox)
                 max_ious, matched_gt_idx = ious.max(dim=1)
                 
