@@ -1,0 +1,43 @@
+# Sample training configuration for SWIN Mask R-CNN
+
+# Dataset paths
+train_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json
+val_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json
+img_root: /home/georgepearse/data/images
+
+# Model parameters
+num_classes: 69
+
+# Training parameters
+batch_size: 1
+num_workers: 0
+lr: 0.0001
+momentum: 0.9
+weight_decay: 0.05
+num_epochs: 12
+
+# Iteration-based validation
+steps_per_validation: 5
+
+# Gradient clipping
+clip_grad_norm: 10.0
+
+# Checkpointing and logging
+checkpoint_dir: ./test_checkpoints
+log_interval: 50
+save_interval: null  # null for epoch-based saving
+
+# Optimizer choice
+optimizer: adamw  # or 'sgd'
+
+# Learning rate scheduler
+use_scheduler: true
+
+# Mixed precision training
+use_amp: false
+
+# Model settings
+pretrained_backbone: true
+
+# Validation settings
+validation_iou_thresh: 0.5

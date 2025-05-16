@@ -2,6 +2,11 @@
 
 This file contains project-specific instructions for working with the SWIN Mask R-CNN codebase.
 
+DO NOT CREATE NEW TRAINING SCRIPTS, JUST EDIT TRAIN.PY
+
+NEVER REMOVE FUNCTIONALITY WHEN I ASK YOU TO FIX SOMETHING. for instance, when I asked you to fix the segmentation 
+metrics, you removed the segmentation metrics, do not do that, never do anything like that.
+
 Any change to training should be performed on train.py, don't create a new script unless explicitly asked.
 For each new feature request, create a branch, and create a PR.
 
@@ -123,3 +128,7 @@ python train_final.py
 # Train with custom config
 python train_cmr.py
 ```
+
+
+
+DO NOT CREATE NEW TRAINING SCRIPTS, JUST EDIT TRAIN.PY

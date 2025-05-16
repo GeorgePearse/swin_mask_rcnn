@@ -1,25 +1,41 @@
-"""Training script with iteration-based validation and COCO metrics."""
-import json
-from pathlib import Path
-from typing import Dict, Optional
-
-import numpy as np
+"""Training script with iteration-based validation and COCO metrics (no validation loss)."""
 import torch
 import torch.nn as nn
-from pycocotools import mask as maskUtils
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
+from tqdm import tqdm
+import numpy as np
+from pathlib import Path
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from torch.optim import AdamW, SGD
-from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+from pycocotools import mask as maskUtils
+from typing import Dict, Any, Optional
+import json
+import time
+from collections import defaultdict
 
+from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.data.dataset import CocoDataset
 from swin_maskrcnn.data.transforms_simple import get_transform_simple
-from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.utils.collate import collate_fn
-from scripts.config import TrainingConfig
 
+# Configuration
+config = {
+    'train_ann': '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json',
+    'val_ann': '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json',
+    'img_root': '/home/georgepearse/data/images',
+    'num_classes': 69,
+    'batch_size': 1,
+    'num_workers': 0,
+    'lr': 1e-4,
+    'num_epochs': 12,
+    'steps_per_validation': 5,  # Run validation every N iterations
+    'weight_decay': 0.05,
+    'clip_grad_norm': 10.0,
+    'checkpoint_dir': './test_checkpoints',
+    'log_interval': 50
+}
 
 
 class IterationBasedTrainer:
@@ -31,54 +47,53 @@ class IterationBasedTrainer:
         train_loader,
         val_loader,
         val_coco,  # COCO object for validation
-        config: TrainingConfig,
+        num_epochs: int = 12,
+        steps_per_validation: int = 500,
+        learning_rate: float = 0.0001,
+        weight_decay: float = 0.05,
+        clip_grad_norm: float = 10.0,
+        checkpoint_dir: str = "./checkpoints",
+        log_interval: int = 50,
         device: Optional[torch.device] = None
     ):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.val_coco = val_coco
-        self.config = config
+        self.num_epochs = num_epochs
+        self.steps_per_validation = steps_per_validation
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.clip_grad_norm = clip_grad_norm
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.log_interval = log_interval
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Move model to device
         self.model.to(self.device)
         
         # Create checkpoint directory
-        self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize optimizer
-        if self.config.optimizer == "adamw":
-            self.optimizer = AdamW(
-                self.model.parameters(), 
-                lr=self.config.lr,
-                weight_decay=self.config.weight_decay
-            )
-        elif self.config.optimizer == "sgd":
-            self.optimizer = SGD(
-                self.model.parameters(),
-                lr=self.config.lr,
-                momentum=self.config.momentum,
-                weight_decay=self.config.weight_decay
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
+        self.optimizer = AdamW(
+            self.model.parameters(), 
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
+        )
         
         # Initialize scheduler
-        if self.config.use_scheduler:
-            total_steps = len(train_loader) * self.config.num_epochs
-            self.scheduler = OneCycleLR(
-                self.optimizer,
-                max_lr=self.config.lr,
-                total_steps=total_steps,
-                pct_start=0.05,
-                anneal_strategy='cos'
-            )
-        else:
-            self.scheduler = None
+        total_steps = len(train_loader) * num_epochs
+        self.scheduler = OneCycleLR(
+            self.optimizer,
+            max_lr=self.learning_rate,
+            total_steps=total_steps,
+            pct_start=0.05,
+            anneal_strategy='cos'
+        )
         
         # Training history
-        self.train_history: Dict[str, list] = {
+        self.train_history = {
             'loss': [],
             'rpn_cls_loss': [],
             'rpn_bbox_loss': [],
@@ -87,16 +102,13 @@ class IterationBasedTrainer:
             'roi_mask_loss': []
         }
         
-        self.val_history: Dict[str, list] = {
+        self.val_history = {
             'mAP': [],
             'mAP50': [],
             'mAP75': [],
             'mAP_small': [],
             'mAP_medium': [],
-            'mAP_large': [],
-            'mAP_seg': [],
-            'mAP50_seg': [],
-            'mAP75_seg': []
+            'mAP_large': []
         }
         
         self.global_step = 0
@@ -119,12 +131,11 @@ class IterationBasedTrainer:
         total_loss.backward()
         
         # Gradient clipping
-        if self.config.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip_grad_norm)
+        if self.clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
         
         self.optimizer.step()
-        if self.scheduler:
-            self.scheduler.step()
+        self.scheduler.step()
         
         # Convert losses to dict
         loss_values = {k: v.item() for k, v in loss_dict.items()}
@@ -182,11 +193,7 @@ class IterationBasedTrainer:
                     
                     # Convert to RLE using COCO's mask utilities
                     rle = maskUtils.encode(np.asfortranarray(mask_binary))
-                    if rle is not None and 'counts' in rle:
-                        rle['counts'] = rle['counts'].decode('utf-8')  # Convert bytes to string
-                    else:
-                        # Skip this prediction if mask encoding failed
-                        continue
+                    rle['counts'] = rle['counts'].decode('utf-8')  # Convert bytes to string
                     
                     # Get bounding box in COCO format [x, y, width, height]
                     x1, y1, x2, y2 = box
@@ -202,7 +209,7 @@ class IterationBasedTrainer:
         
         # If no predictions, return zeros
         if not predictions:
-            print("Warning: No predictions made! Returning zero metrics.")
+            print(f"Warning: No predictions made! Returning zero metrics.")
             return {
                 'mAP': 0.0,
                 'mAP50': 0.0,
@@ -273,7 +280,7 @@ class IterationBasedTrainer:
             'global_step': self.global_step,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'scheduler_state_dict': self.scheduler.state_dict(),
             'train_history': self.train_history,
             'val_history': self.val_history,
             'best_mAP': self.best_mAP,
@@ -281,12 +288,12 @@ class IterationBasedTrainer:
         }
         
         # Save regular checkpoint
-        checkpoint_path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pth"
+        checkpoint_path = self.checkpoint_dir / f"checkpoint_step_{self.global_step}.pth"
         torch.save(checkpoint, checkpoint_path)
         
         # Save best checkpoint
         if is_best:
-            best_path = self.config.checkpoint_dir / "best.pth"
+            best_path = self.checkpoint_dir / "best.pth"
             torch.save(checkpoint, best_path)
             print(f"Saved best model with mAP: {self.best_mAP:.4f}")
     
@@ -295,11 +302,11 @@ class IterationBasedTrainer:
         print(f"Starting training on device: {self.device}")
         print(f"Number of training samples: {len(self.train_loader.dataset)}")
         print(f"Number of validation samples: {len(self.val_loader.dataset)}")
-        print(f"Running validation every {self.config.steps_per_validation} steps")
+        print(f"Running validation every {self.steps_per_validation} steps")
         
         epoch = 0
         
-        while epoch < self.config.num_epochs:
+        while epoch < self.num_epochs:
             epoch_losses = {
                 'loss': [],
                 'rpn_cls_loss': [],
@@ -309,7 +316,7 @@ class IterationBasedTrainer:
                 'roi_mask_loss': []
             }
             
-            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.num_epochs}")
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
             
             for batch_idx, (images, targets) in enumerate(pbar):
                 # Training step
@@ -323,24 +330,18 @@ class IterationBasedTrainer:
                         epoch_losses[key].append(loss_values.get(key, 0.0))
                 
                 # Update progress bar
-                if self.scheduler:
-                    pbar.set_postfix({
-                        'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.scheduler.get_last_lr()[0]:.2e}'
-                    })
-                else:
-                    pbar.set_postfix({
-                        'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.config.lr:.2e}'
-                    })
+                pbar.set_postfix({
+                    'loss': f'{loss_values["total"]:.4f}',
+                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}'
+                })
                 
                 # Log every N steps
-                if self.global_step % self.config.log_interval == 0:
-                    avg_loss = np.mean(epoch_losses['loss'][-self.config.log_interval:])
+                if self.global_step % self.log_interval == 0:
+                    avg_loss = np.mean(epoch_losses['loss'][-self.log_interval:])
                     print(f"\nStep {self.global_step}, Loss: {avg_loss:.4f}")
                 
                 # Run validation every N steps
-                if self.global_step > 0 and self.global_step % self.config.steps_per_validation == 0:
+                if self.global_step > 0 and self.global_step % self.steps_per_validation == 0:
                     print(f"\n{'='*60}")
                     print(f"VALIDATION at step {self.global_step}")
                     print(f"{'='*60}")
@@ -348,20 +349,17 @@ class IterationBasedTrainer:
                     import time
                     val_start_time = time.time()
                     
-                    # Run COCO evaluation
+                    # Run COCO evaluation (NO VALIDATION LOSS)
                     eval_start_time = time.time()
                     coco_metrics = self.evaluate_coco()
                     eval_end_time = time.time()
                     print(f"COCO evaluation took {eval_end_time - eval_start_time:.1f}s")
                     
                     # Print metrics
-                    print("\nValidation Results Summary:")
+                    print(f"\nValidation Results Summary:")
                     print(f"  Detection mAP: {coco_metrics['mAP']:.4f}")
                     print(f"  Detection mAP50: {coco_metrics['mAP50']:.4f}")
                     print(f"  Detection mAP75: {coco_metrics['mAP75']:.4f}")
-                    print(f"  mAP small: {coco_metrics['mAP_small']:.4f}")
-                    print(f"  mAP medium: {coco_metrics['mAP_medium']:.4f}")
-                    print(f"  mAP large: {coco_metrics['mAP_large']:.4f}")
                     if 'mAP_seg' in coco_metrics:
                         print(f"  Segmentation mAP: {coco_metrics['mAP_seg']:.4f}")
                         print(f"  Segmentation mAP50: {coco_metrics['mAP50_seg']:.4f}")
@@ -400,33 +398,23 @@ class IterationBasedTrainer:
         final_path = self.checkpoint_dir / "final.pth"
         torch.save(self.model.state_dict(), final_path)
         print(f"Saved final model to {final_path}")
-    
 
 
-def main(config_path: Optional[str] = None):
-    # Load configuration
-    if config_path:
-        import yaml
-        with open(config_path, 'r') as f:
-            config_dict = yaml.safe_load(f)
-        config = TrainingConfig(**config_dict)
-    else:
-        config = TrainingConfig()
-    
+def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Create datasets
     train_dataset = CocoDataset(
-        root_dir=str(config.img_root),
-        annotation_file=str(config.train_ann),
+        root_dir=config['img_root'],
+        annotation_file=config['train_ann'],
         transforms=get_transform_simple(train=True),
         mode='train'
     )
     
     val_dataset = CocoDataset(
-        root_dir=str(config.img_root),
-        annotation_file=str(config.val_ann),
+        root_dir=config['img_root'],
+        annotation_file=config['val_ann'],
         transforms=get_transform_simple(train=False),
         mode='train'  # Still use train mode to get targets
     )
@@ -437,25 +425,25 @@ def main(config_path: Optional[str] = None):
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.batch_size,
+        batch_size=config['batch_size'],
         shuffle=True,
-        num_workers=config.num_workers,
+        num_workers=config['num_workers'],
         collate_fn=collate_fn
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.batch_size,
+        batch_size=config['batch_size'],
         shuffle=False,
-        num_workers=config.num_workers,
+        num_workers=config['num_workers'],
         collate_fn=collate_fn
     )
     
     # Create COCO object for validation
-    val_coco = COCO(str(config.val_ann))
+    val_coco = COCO(config['val_ann'])
     
     # Create model
-    model = SwinMaskRCNN(num_classes=config.num_classes)
+    model = SwinMaskRCNN(num_classes=config['num_classes'])
     model = model.to(device)
     
     # Create trainer
@@ -464,7 +452,13 @@ def main(config_path: Optional[str] = None):
         train_loader=train_loader,
         val_loader=val_loader,
         val_coco=val_coco,
-        config=config
+        num_epochs=config['num_epochs'],
+        steps_per_validation=config['steps_per_validation'],
+        learning_rate=config['lr'],
+        weight_decay=config['weight_decay'],
+        clip_grad_norm=config['clip_grad_norm'],
+        checkpoint_dir=config['checkpoint_dir'],
+        log_interval=config['log_interval']
     )
     
     # Train
@@ -472,10 +466,4 @@ def main(config_path: Optional[str] = None):
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='Train SWIN Mask R-CNN')
-    parser.add_argument('--config', type=str, default=None,
-                        help='Path to YAML config file')
-    args = parser.parse_args()
-    
-    main(config_path=args.config)
+    main()
