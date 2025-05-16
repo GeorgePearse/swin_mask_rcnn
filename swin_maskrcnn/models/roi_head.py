@@ -451,17 +451,37 @@ class StandardRoIHead(nn.Module):
         
         # Bbox regression loss
         if len(bbox_targets) > 0 and any(len(t) > 0 for t in bbox_targets):
-            pos_inds = all_labels > 0
-            if pos_inds.any():
-                pos_bbox_preds = bbox_preds[pos_inds]
-                pos_labels = all_labels[pos_inds]
+            # Count positive samples in each batch
+            batch_pos_counts = [torch.sum(lbls > 0).item() for lbls in labels]
+            
+            # Only compute loss if we have positive samples
+            if sum(batch_pos_counts) > 0:
+                # Get positive predictions in the same order as targets
+                pos_preds = []
+                start_idx = 0
+                for i, count in enumerate(batch_pos_counts):
+                    if count > 0:
+                        # Get predictions for this batch
+                        batch_preds = bbox_preds[start_idx:start_idx + len(labels[i])]
+                        pos_mask = labels[i] > 0
+                        pos_batch_preds = batch_preds[pos_mask]
+                        
+                        # Select predictions for corresponding classes
+                        pos_labels_batch = labels[i][pos_mask]
+                        pos_batch_preds = pos_batch_preds.reshape(len(pos_labels_batch), -1, 4)
+                        pos_batch_preds = pos_batch_preds[torch.arange(len(pos_labels_batch)), pos_labels_batch - 1]
+                        pos_preds.append(pos_batch_preds)
+                    start_idx += len(labels[i])
                 
-                # Select predictions for corresponding classes
-                pos_bbox_preds = pos_bbox_preds.reshape(len(pos_labels), -1, 4)
-                pos_bbox_preds = pos_bbox_preds[torch.arange(len(pos_labels)), pos_labels - 1]
-                
-                bbox_targets = torch.cat(bbox_targets)
-                bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets)
+                # Only concatenate if we have positive predictions
+                if pos_preds:
+                    pos_bbox_preds = torch.cat(pos_preds)
+                    bbox_targets = torch.cat(bbox_targets)
+                    assert pos_bbox_preds.shape[0] == bbox_targets.shape[0], \
+                        f"Shape mismatch: predictions {pos_bbox_preds.shape[0]} vs targets {bbox_targets.shape[0]}"
+                    bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets)
+                else:
+                    bbox_loss = torch.tensor(0.0, device=cls_scores.device)
             else:
                 bbox_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
@@ -470,15 +490,29 @@ class StandardRoIHead(nn.Module):
         
         # Mask loss
         if mask_preds is not None and len(mask_targets) > 0:
-            pos_labels_list = [lbls[lbls > 0] for lbls in labels]
-            if any(len(lbls) > 0 for lbls in pos_labels_list):
-                pos_labels = torch.cat(pos_labels_list)
+            # Get positive predictions in the same order as targets
+            pos_mask_preds = []
+            start_idx = 0
+            for i, lbls in enumerate(labels):
+                pos_mask = lbls > 0
+                if pos_mask.any():
+                    # Get predictions for this batch
+                    batch_mask_preds = mask_preds[start_idx:start_idx + len(lbls)]
+                    pos_batch_mask_preds = batch_mask_preds[pos_mask]
+                    
+                    # Select predictions for corresponding classes
+                    pos_labels_batch = lbls[pos_mask]
+                    pos_batch_mask_preds = pos_batch_mask_preds[torch.arange(len(pos_labels_batch)), pos_labels_batch - 1]
+                    pos_mask_preds.append(pos_batch_mask_preds)
+                start_idx += len(lbls)
+            
+            # Only compute loss if we have positive predictions
+            if pos_mask_preds:
+                pos_mask_preds = torch.cat(pos_mask_preds)
                 mask_targets = torch.cat(mask_targets)
-                
-                # Select predictions for corresponding classes
-                mask_preds = mask_preds[torch.arange(len(pos_labels)), pos_labels - 1]
-                
-                mask_loss = F.binary_cross_entropy_with_logits(mask_preds, mask_targets)
+                assert pos_mask_preds.shape[0] == mask_targets.shape[0], \
+                    f"Shape mismatch: predictions {pos_mask_preds.shape[0]} vs targets {mask_targets.shape[0]}"
+                mask_loss = F.binary_cross_entropy_with_logits(pos_mask_preds, mask_targets)
             else:
                 mask_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
