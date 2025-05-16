@@ -19,6 +19,7 @@ class SwinMaskRCNN(nn.Module):
         num_classes=80,
         pretrained_backbone=None,
         freeze_backbone=False,
+        frozen_backbone_stages=-1,  # New parameter for fine-grained control
         rpn_pos_threshold=0.7,
         rpn_neg_threshold=0.3,
         rpn_batch_size=256,
@@ -33,10 +34,17 @@ class SwinMaskRCNN(nn.Module):
     ):
         super().__init__()
         
-        # Backbone
+        # Backbone - use frozen_backbone_stages or fall back to freeze_backbone
+        if frozen_backbone_stages >= 0:
+            stages_to_freeze = frozen_backbone_stages
+        elif freeze_backbone:
+            stages_to_freeze = 4  # Freeze all stages
+        else:
+            stages_to_freeze = -1  # Don't freeze any stages
+            
         self.backbone = SwinTransformer(
             embed_dims=96,
-            depths=[2, 2, 6, 2],
+            depths=[2, 2, 18, 2],
             num_heads=[3, 6, 12, 24],
             window_size=7,
             mlp_ratio=4.,
@@ -47,7 +55,7 @@ class SwinMaskRCNN(nn.Module):
             drop_path_rate=0.2,
             patch_norm=True,
             out_indices=(0, 1, 2, 3),
-            frozen_stages=-1 if not freeze_backbone else 4,
+            frozen_stages=stages_to_freeze,
         )
         
         if pretrained_backbone:

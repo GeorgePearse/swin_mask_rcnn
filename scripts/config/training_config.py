@@ -80,6 +80,16 @@ class TrainingConfig(BaseModel):
         default=True,
         description="Use pretrained backbone weights"
     )
+    pretrained_checkpoint_url: str = Field(
+        default="https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth",
+        description="URL for pretrained checkpoint (mmdetection format)"
+    )
+    frozen_backbone_stages: int = Field(
+        default=2,
+        ge=-1,
+        le=4,
+        description="Number of SWIN backbone stages to freeze (-1 for none, max 4 for all stages)"
+    )
     
     # Validation settings
     validation_iou_thresh: float = Field(

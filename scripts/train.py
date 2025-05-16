@@ -20,6 +20,7 @@ from swin_maskrcnn.data.transforms_simple import get_transform_simple
 from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.utils.collate import collate_fn
 from scripts.config import TrainingConfig
+from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
 
 
 def get_gpu_memory_mb():
@@ -412,7 +413,6 @@ class IterationBasedTrainer:
                     print(f"VALIDATION at step {self.global_step}")
                     print(f"{'='*60}")
                     
-                    import time
                     val_start_time = time.time()
                     
                     # Run COCO evaluation
@@ -540,7 +540,16 @@ def main(config_path: Optional[str] = None):
     val_coco = COCO(str(config.val_ann))
     
     # Create model
-    model = SwinMaskRCNN(num_classes=config.num_classes)
+    model = SwinMaskRCNN(
+        num_classes=config.num_classes,
+        frozen_backbone_stages=config.frozen_backbone_stages  # Use the frozen stages from config
+    )
+    
+    # Load pretrained weights if specified
+    if config.pretrained_backbone and config.pretrained_checkpoint_url:
+        print(f"Loading pretrained weights from {config.pretrained_checkpoint_url}")
+        load_pretrained_from_url(model, config.pretrained_checkpoint_url, strict=False)
+    
     model = model.to(device)
     
     # Create trainer

@@ -1,173 +1,303 @@
 # SWIN Mask R-CNN
 
-An isolated implementation of SWIN-based Mask R-CNN without mm* dependencies.
+A clean, standalone implementation of SWIN-based Mask R-CNN without dependencies on mmcv, mmengine, or mmdetection packages. This implementation provides a modular, easy-to-understand codebase for instance segmentation tasks.
+
+## Features
+
+### Model Architecture
+- **SWIN Transformer Backbone**: Full implementation from scratch with configurable depths and dimensions
+- **Feature Pyramid Network (FPN)**: Multi-scale feature extraction for improved detection
+- **Region Proposal Network (RPN)**: Efficient object proposal generation with configurable IoU thresholds
+- **ROI Head**: Combined detection and segmentation head with mask prediction
+- **Configurable Architecture**: Easily adjust model components and hyperparameters
+
+### Training Capabilities
+- **Iteration-based Validation**: Validate at specific training steps rather than just epochs
+- **COCO Evaluation Metrics**: Full integration with COCO evaluation for comprehensive mAP metrics
+- **Gradient Clipping**: Prevent gradient explosion during training
+- **Mixed Precision Training**: Optional automatic mixed precision (AMP) support
+- **Multiple Optimizers**: Support for both AdamW and SGD optimizers
+- **Learning Rate Scheduling**: OneCycleLR scheduler with warmup
+- **GPU Monitoring**: Real-time GPU utilization and memory tracking
+
+### Backbone Control
+- **Pretrained Weights Support**: Load pretrained SWIN backbone weights from mmdetection
+  - Default weights: Swin-S trained on COCO
+  - URL: https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth
+  - Automatic download and conversion from mmdetection format
+- **Flexible Freezing**: Fine-grained control over backbone layer freezing
+  - Freeze 0-4 stages of the SWIN backbone
+  - Default: 2 stages frozen for optimal transfer learning
+  - Configurable via `frozen_backbone_stages` parameter
+- **Memory Efficient**: Frozen layers don't compute gradients
+
+### Data Pipeline
+- **COCO Dataset Support**: Full COCO format annotation support
+- **CMR Dataset Support**: Custom dataset format for medical imaging
+- **Flexible Transforms**: Comprehensive data augmentation pipeline
+- **Efficient Collation**: Custom collate function for variable-sized inputs
+- **Multi-worker Loading**: Parallel data loading for improved throughput
+
+### Configuration Management
+- **Pydantic Configuration**: Type-safe configuration with automatic validation
+- **YAML Support**: Easy configuration via YAML files
+- **Parameter Validation**: Automatic bounds checking and type validation
+- **Flexible Training Scripts**: Multiple entry points for different use cases
+
+### Monitoring & Debugging
+- **Comprehensive Logging**: Detailed loss breakdowns (RPN cls/bbox, ROI cls/bbox/mask)
+- **Progress Tracking**: TQDM progress bars with live statistics
+- **Training History**: Complete history of all metrics across training
+- **Validation Metrics**: COCO mAP, mAP@50, mAP@75, segmentation mAP
+
+### Checkpointing & Recovery
+- **Flexible Saving**: Save checkpoints by epoch or iteration
+- **Best Model Tracking**: Automatically save best performing models based on mAP
+- **Model Export**: Export trained models for inference
+- **State Management**: Save complete training state for resumption
+
+### Inference Pipeline
+- **Batch Inference**: Process multiple images simultaneously
+- **Post-processing**: NMS and score thresholding
+- **FiftyOne Integration**: Visualize predictions with interactive tools
+- **Export Formats**: Save predictions in COCO format
 
 ## Installation
 
 ```bash
-uv pip install -e .
+# Clone the repository
+git clone <repository-url>
+cd swin_maskrcnn
+
+# Install with uv (recommended)
+uv pip install -e ".[dev]"
+
+# Or with standard pip
+pip install -e ".[dev]"
 ```
 
-## Usage
+## Quick Start
 
-### Training
-
-To train the model on COCO dataset:
+### Training with Configuration
 
 ```bash
-train-maskrcnn \
-    --train-ann /path/to/annotations/instances_train2017.json \
-    --val-ann /path/to/annotations/instances_val2017.json \
-    --batch-size 2 \
-    --num-epochs 12
+# Using the main training script with YAML config
+python scripts/train.py --config scripts/config/config.yaml
+
+# Or use defaults for CMR dataset
+python scripts/train.py
 ```
 
-Or use the training script directly:
+### Configuration File
 
-```bash
-python scripts/train_simple.py \
-    --train-ann /path/to/annotations/instances_train2017.json \
-    --val-ann /path/to/annotations/instances_val2017.json \
-    --batch-size 2 \
-    --num-epochs 12
+Example `config.yaml`:
+
+```yaml
+# Dataset paths
+train_ann: /path/to/train/annotations.json
+val_ann: /path/to/val/annotations.json
+img_root: /path/to/images
+
+# Model parameters
+num_classes: 69
+pretrained_backbone: true
+pretrained_checkpoint_url: https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth
+frozen_backbone_stages: 2  # Default: freeze first 2 stages
+
+# Training parameters
+train_batch_size: 4
+val_batch_size: 8
+num_workers: 0
+lr: 0.0001
+num_epochs: 12
+
+# Iteration-based validation
+steps_per_validation: 200
+validation_start_step: 1000
+
+# Optimizer settings
+optimizer: adamw  # or 'sgd'
+use_scheduler: true
+clip_grad_norm: 10.0
+
+# Checkpointing
+checkpoint_dir: ./test_checkpoints
+log_interval: 50
 ```
 
-The script will automatically locate the image directories based on the annotation paths. If your images are in a different location, use `--images-root`:
-
-```bash
-train-maskrcnn \
-    --train-ann /path/to/annotations/instances_train2017.json \
-    --val-ann /path/to/annotations/instances_val2017.json \
-    --images-root /path/to/coco/images \
-    --batch-size 2 \
-    --num-epochs 12
-```
-
-### Python API
+### Programmatic Usage
 
 ```python
-from swin_maskrcnn import SwinMaskRCNN, create_dataloaders, train_mask_rcnn
+from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
+from scripts.config.training_config import TrainingConfig
+from scripts.train import main
 
-# Create model
-model = SwinMaskRCNN(num_classes=80)
-
-# Create dataloaders
-train_loader, val_loader = create_dataloaders(
-    train_root="/path/to/train2017",
-    train_ann_file="/path/to/instances_train2017.json",
-    val_root="/path/to/val2017",
-    val_ann_file="/path/to/instances_val2017.json",
-    batch_size=2
+# Create configuration
+config = TrainingConfig(
+    train_ann='/path/to/train.json',
+    val_ann='/path/to/val.json',
+    img_root='/path/to/images',
+    num_classes=80,
+    frozen_backbone_stages=2,  # Freeze first 2 stages
+    train_batch_size=4,
+    lr=0.0001
 )
 
-# Train
-config = {
-    'num_epochs': 12,
-    'learning_rate': 0.0001,
-    'checkpoint_dir': './checkpoints'
-}
-
-trainer = train_mask_rcnn(model, train_loader, val_loader, config)
+# Train model
+main(config)
 ```
 
 ### Inference
 
-Run inference on images and visualize results in FiftyOne:
-
 ```bash
 # Run inference from command line
 python scripts/inference.py \
-    --model-path /path/to/checkpoint.pth \
+    --model-path checkpoints/best.pth \
     --images /path/to/image1.jpg /path/to/image2.jpg \
     --score-threshold 0.5 \
     --nms-threshold 0.5
 ```
 
-Using the Python API:
+Python API:
 
 ```python
-from swin_maskrcnn import run_inference_pipeline
+from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
+from swin_maskrcnn.inference.predictor import Predictor
+import torch
 
-# Run inference and visualize
-results = run_inference_pipeline(
-    model_path="/path/to/checkpoint.pth",
-    image_paths=["/path/to/image1.jpg", "/path/to/image2.jpg"],
-    num_classes=80,
+# Load model
+model = SwinMaskRCNN(num_classes=80)
+model.load_state_dict(torch.load('checkpoint.pth'))
+
+# Create predictor
+predictor = Predictor(model, device='cuda')
+
+# Run inference
+predictions = predictor.predict(
+    image_paths=['image1.jpg', 'image2.jpg'],
     score_threshold=0.5,
-    visualize=True,  # Opens FiftyOne app
-    dataset_name="my_predictions"
+    nms_threshold=0.5
+)
+```
+
+## Advanced Features
+
+### Pretrained Weights
+
+The model can automatically load pretrained weights from mmdetection:
+
+```python
+# Using default Swin-S COCO weights
+config = TrainingConfig(
+    pretrained_backbone=True,  # Enable pretrained weights
+    pretrained_checkpoint_url="https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth"
 )
 
-# Access predictions
-for image_path, predictions in zip(results['image_paths'], results['predictions']):
-    print(f"Image: {image_path}")
-    print(f"Boxes: {predictions['boxes']}")
-    print(f"Labels: {predictions['labels']}")
-    print(f"Scores: {predictions['scores']}")
-    print(f"Masks: {predictions['masks'].shape if predictions['masks'] is not None else None}")
+# Or use custom weights
+config = TrainingConfig(
+    pretrained_backbone=True,
+    pretrained_checkpoint_url="path/to/your/checkpoint.pth"
+)
 ```
 
-FiftyOne visualization features:
-- Interactive bounding box and mask visualization
-- Confidence score filtering
-- Class-based filtering
-- Export to various formats
-- Dataset versioning and management
+### Backbone Freezing Strategies
 
-### Example
+Control which layers are trainable:
 
-See `examples/inference_example.py` for a complete working example:
+```python
+# No freezing - train entire model
+config = TrainingConfig(frozen_backbone_stages=-1)
 
-```bash
-python examples/inference_example.py
+# Freeze patch embedding only
+config = TrainingConfig(frozen_backbone_stages=0)
+
+# Freeze first 2 stages (default)
+config = TrainingConfig(frozen_backbone_stages=2)
+
+# Freeze entire backbone
+config = TrainingConfig(frozen_backbone_stages=4)
 ```
 
-## Architecture
+### Iteration-based Validation
 
-- **Backbone**: SWIN Transformer
-- **Neck**: Feature Pyramid Network (FPN)
-- **Head**: Region Proposal Network (RPN) + ROI Head with mask prediction
+Validate at specific training steps:
 
-## Requirements
+```python
+config = TrainingConfig(
+    steps_per_validation=200,  # Validate every 200 steps
+    validation_start_step=1000  # Start validation after 1000 steps
+)
+```
 
-- PyTorch >= 2.0
-- torchvision >= 0.15
-- pycocotools
-- albumentations
-- tqdm
-- einops
+### Custom Dataset Support
+
+The framework supports both COCO and custom dataset formats:
+
+```python
+from swin_maskrcnn.data.dataset import CocoDataset
+
+# COCO format
+dataset = CocoDataset(
+    root_dir='/path/to/images',
+    annotation_file='/path/to/annotations.json',
+    transforms=get_transform_simple(train=True),
+    mode='train'
+)
+
+# Custom format (requires adapter)
+dataset = CustomDataset(
+    data_dir='/path/to/data',
+    transforms=get_transform_simple(train=True)
+)
+```
+
+## Architecture Details
+
+### Model Components
+
+1. **SWIN Backbone**
+   - 4 stages with depths [2, 2, 6, 2]
+   - Window size: 7x7
+   - Patch size: 4x4
+   - Embedding dimensions: 96 → 192 → 384 → 768
+
+2. **FPN Neck**
+   - 5-level feature pyramid
+   - 256 output channels
+   - Top-down pathway with lateral connections
+
+3. **RPN Head**
+   - 3 aspect ratios per location
+   - IoU thresholds: 0.7 (positive), 0.3 (negative)
+   - NMS threshold: 0.7
+
+4. **ROI Head**
+   - 7x7 ROI align for detection
+   - 14x14 ROI align for segmentation
+   - Class-specific box regression
 
 ## Development
 
-Install development dependencies:
-
-```bash
-uv pip install -e ".[dev]"
-```
-
 ### Testing
 
-Run tests:
-
 ```bash
+# Run all tests
 pytest tests/
-```
 
-Run tests with coverage:
+# Run specific test
+pytest tests/test_model.py
 
-```bash
+# With coverage
 pytest tests/ --cov=swin_maskrcnn --cov-report=html
 ```
 
 ### Code Quality
 
-Run linters and type checkers:
-
 ```bash
 # Format code
 black .
 
-# Lint code
+# Lint
 ruff check .
 
 # Type check
@@ -176,12 +306,30 @@ mypy swin_maskrcnn/
 
 ### Contributing
 
-This project uses GitHub Actions for continuous integration. All pull requests will automatically run tests against Python 3.9, 3.10, and 3.11.
-
-To contribute:
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details
+
+## Acknowledgments
+
+- SWIN Transformer paper authors
+- PyTorch and torchvision teams
+- COCO dataset maintainers
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@software{swin_maskrcnn,
+  title={SWIN Mask R-CNN: A Standalone Implementation},
+  year={2024},
+  url={https://github.com/yourusername/swin_maskrcnn}
+}
+```

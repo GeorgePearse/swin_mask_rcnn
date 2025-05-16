@@ -40,6 +40,8 @@ use_amp: false
 
 # Model settings
 pretrained_backbone: true
+pretrained_checkpoint_url: https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth
+frozen_backbone_stages: 2  # Number of SWIN backbone stages to freeze (-1 for none, 0-4 to freeze stages)
 
 # Validation settings
 validation_iou_thresh: 0.5

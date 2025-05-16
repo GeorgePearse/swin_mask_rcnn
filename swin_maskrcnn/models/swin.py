@@ -374,7 +374,7 @@ class SwinTransformer(nn.Module):
         in_channels: int = 3,
         num_classes: int = 1000,
         embed_dims: int = 96,
-        depths: List[int] = [2, 2, 6, 2],
+        depths: List[int] = [2, 2, 18, 2],
         num_heads: List[int] = [3, 6, 12, 24],
         window_size: int = 7,
         mlp_ratio: float = 4.,
