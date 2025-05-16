@@ -1,0 +1,42 @@
+# Test configuration for PyTorch Lightning
+train_ann: '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json'
+val_ann: '/home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json'
+img_root: '/home/georgepearse/data/images'
+num_classes: 69
+
+# Training parameters
+train_batch_size: 2
+val_batch_size: 1  # Reduced to avoid OOM
+num_workers: 0
+lr: 0.001
+momentum: 0.9
+weight_decay: 0.0001
+num_epochs: 1  # Just 1 epoch for testing
+
+# Validation settings
+steps_per_validation: 50
+validation_start_step: 10  # Quick validation for testing
+
+# Gradient clipping
+clip_grad_norm: 10.0
+
+# Checkpointing
+checkpoint_dir: './test_checkpoints'
+log_interval: 5
+
+# Optimizer
+optimizer: 'sgd'
+
+# Scheduler
+use_scheduler: false
+
+# Mixed precision
+use_amp: true  # Use mixed precision to save memory
+
+# Model settings
+pretrained_backbone: false  # No pretrained weights for testing
+pretrained_checkpoint_url: ''
+frozen_backbone_stages: -1
+
+# Validation settings
+validation_iou_thresh: 0.5

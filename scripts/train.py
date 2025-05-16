@@ -1,18 +1,20 @@
-"""Training script with iteration-based validation and COCO metrics."""
+"""Training script with PyTorch Lightning and TensorBoard integration."""
 import json
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 
 import numpy as np
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import TensorBoardLogger
 from pycocotools import mask as maskUtils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from torch.optim import AdamW, SGD, Optimizer
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 import time
 import csv
 from datetime import datetime
@@ -60,49 +62,63 @@ def get_gpu_utilization():
     return 0.0
 
 
-class IterationBasedTrainer:
-    """Trainer with iteration-based validation and COCO evaluation."""
+class MaskRCNNLightningModule(pl.LightningModule):
+    """PyTorch Lightning Module for SWIN-based Mask R-CNN."""
     
     def __init__(
         self,
-        model: nn.Module,
-        train_loader,
-        val_loader,
-        val_coco,  # COCO object for validation
         config: TrainingConfig,
-        device: Optional[torch.device] = None,
-        logger = None
+        val_coco,  # COCO object for validation
     ):
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.val_coco = val_coco
+        super().__init__()
         self.config = config
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logger = logger
+        self.val_coco = val_coco
         
-        # Move model to device
-        self.model.to(self.device)
+        # Initialize model
+        self.model = SwinMaskRCNN(
+            num_classes=config.num_classes,
+            frozen_backbone_stages=config.frozen_backbone_stages
+        )
         
-        # Create run-specific directory with timestamp
-        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = self.config.checkpoint_dir / f"run_{self.run_timestamp}"
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        # Load pretrained weights if specified
+        if config.pretrained_backbone and config.pretrained_checkpoint_url:
+            load_pretrained_from_url(self.model, config.pretrained_checkpoint_url, strict=False)
         
-        # Log the run directory
-        if self.logger:
-            self.logger.info(f"Created run directory: {self.run_dir}")
+        # Save hyperparameters
+        self.save_hyperparameters()
         
+        # Initialize CSV logger for problematic images
+        self.error_log_path = Path("problematic_images.csv")
+        with open(self.error_log_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['epoch', 'batch_idx', 'image_filename', 'image_id', 'error_type', 'error_message'])
+        
+        # Validation predictions storage
+        self.validation_outputs = []
+        
+        # Loss weights
+        self.loss_weights = {
+            'rpn_cls_loss': 1.0,
+            'rpn_bbox_loss': 1.0,
+            'roi_cls_loss': 1.0,
+            'roi_bbox_loss': 1.0,
+            'roi_mask_loss': 1.0,
+        }
+    
+    def forward(self, images, targets=None):
+        return self.model(images, targets)
+    
+    def configure_optimizers(self):
+        """Configure optimizer and scheduler."""
         # Initialize optimizer
-        self.optimizer: Optimizer
         if self.config.optimizer == "adamw":
-            self.optimizer = AdamW(
+            optimizer = AdamW(
                 self.model.parameters(), 
                 lr=self.config.lr,
                 weight_decay=self.config.weight_decay
             )
         elif self.config.optimizer == "sgd":
-            self.optimizer = SGD(
+            optimizer = SGD(
                 self.model.parameters(),
                 lr=self.config.lr,
                 momentum=self.config.momentum,
@@ -111,59 +127,32 @@ class IterationBasedTrainer:
         else:
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
         
-        # Initialize scheduler
-        self.scheduler: Optional[OneCycleLR] = None
-        
-        # Initialize CSV logger for problematic images
-        self.error_log_path = self.run_dir / "problematic_images.csv"
-        
-        # Create CSV file with headers
-        with open(self.error_log_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['epoch', 'batch_idx', 'image_filename', 'image_id', 'error_type', 'error_message'])
+        # Initialize scheduler if requested
         if self.config.use_scheduler:
-            total_steps = len(train_loader) * self.config.num_epochs
-            self.scheduler = OneCycleLR(
-                self.optimizer,
+            scheduler = OneCycleLR(
+                optimizer,
                 max_lr=self.config.lr,
-                total_steps=total_steps,
+                total_steps=self.trainer.estimated_stepping_batches,
                 pct_start=0.05,
                 anneal_strategy='cos'
             )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                }
+            }
         
-        # Training history
-        self.train_history: Dict[str, list] = {
-            'loss': [],
-            'rpn_cls_loss': [],
-            'rpn_bbox_loss': [],
-            'roi_cls_loss': [],
-            'roi_bbox_loss': [],
-            'roi_mask_loss': [],
-            'memory_mb': [],
-            'gpu_utilization': []
-        }
-        
-        self.val_history: Dict[str, list] = {
-            'mAP': [],
-            'mAP50': [],
-            'mAP75': [],
-            'mAP_small': [],
-            'mAP_medium': [],
-            'mAP_large': [],
-            'mAP_seg': [],
-            'mAP50_seg': [],
-            'mAP75_seg': []
-        }
-        
-        self.global_step = 0
-        self.best_mAP = 0.0
+        return optimizer
     
-    def train_step(self, images, targets) -> Optional[Dict[str, float]]:
-        """Single training step. Returns None if an error occurs."""
+    def training_step(self, batch, batch_idx):
+        """Lightning training step."""
+        images, targets = batch
+        
         try:
-            self.model.train()
-            
-            # Move to device, preserving string fields
+            # Move to device
             images = [img.to(self.device) for img in images]
             targets_device = []
             for t in targets:
@@ -176,59 +165,39 @@ class IterationBasedTrainer:
                 targets_device.append(t_device)
             
             # Forward pass
-            loss_dict = self.model(images, targets_device)
-            
-            # Apply loss weights (similar to MMDetection)
-            loss_weights = {
-                'rpn_cls_loss': 1.0,
-                'rpn_bbox_loss': 1.0,
-                'roi_cls_loss': 1.0,
-                'roi_bbox_loss': 1.0,
-                'roi_mask_loss': 1.0,
-            }
+            loss_dict = self.forward(images, targets_device)
             
             # Weight the losses
             weighted_losses = {}
             for k, v in loss_dict.items():
-                weight = loss_weights.get(k, 1.0)
+                weight = self.loss_weights.get(k, 1.0)
                 weighted_losses[k] = v * weight
             
             total_loss = sum(weighted_losses.values())
             
-            # Backward pass
-            self.optimizer.zero_grad()
-            total_loss.backward()
+            # Log losses to TensorBoard
+            self.log('train/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+            for k, v in loss_dict.items():
+                self.log(f'train/{k}', v, on_step=True, on_epoch=True)
             
-            # Gradient clipping
-            if self.config.clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip_grad_norm)
+            # Log memory usage
+            memory_mb = get_gpu_memory_mb()
+            gpu_util = get_gpu_utilization()
+            self.log('train/memory_mb', memory_mb, on_step=True, on_epoch=False)
+            self.log('train/gpu_utilization', gpu_util, on_step=True, on_epoch=False)
             
-            self.optimizer.step()
-            if self.scheduler:
-                self.scheduler.step()
+            return total_loss
             
-            # Convert losses to dict
-            loss_values = {k: v.item() for k, v in loss_dict.items()}
-            loss_values['total'] = total_loss.item()
-            
-            # Add memory usage and GPU utilization
-            loss_values['memory_mb'] = get_gpu_memory_mb()
-            loss_values['gpu_utilization'] = get_gpu_utilization()
-            
-            return loss_values
-        
         except Exception as e:
             # Log the error with information about the problematic images
-            error_info = {
+            self.log_error_to_csv(self.current_epoch, batch_idx, {
                 'error_type': type(e).__name__,
                 'error_message': str(e),
-                'targets': targets  # Keep the original targets with filenames
-            }
+            }, targets)
             
-            if self.logger:
-                self.logger.warning(f"Error during training step: {e}")
-            
-            return error_info
+            # Skip this batch
+            print(f"Skipping batch {batch_idx} due to error: {e}")
+            return None
     
     def log_error_to_csv(self, epoch: int, batch_idx: int, error_info: Dict, targets: list):
         """Log error information to CSV file."""
@@ -249,89 +218,86 @@ class IterationBasedTrainer:
                     error_info.get('error_message', 'No message')
                 ])
     
-    @torch.no_grad()
-    def evaluate_coco(self) -> Dict[str, float]:
-        """Evaluate model using COCO metrics."""
-        self.logger.info("Starting COCO evaluation...")
-        self.model.eval()
+    def validation_step(self, batch, batch_idx):
+        """Lightning validation step."""
+        images, targets = batch
         
-        predictions: list[Dict[str, Any]] = []
-        total_images = 0
+        # Move to device
+        images = [img.to(self.device) for img in images]
         
-        pbar = tqdm(self.val_loader, desc="Evaluating (inference)")
-        for batch_idx, (images, targets) in enumerate(pbar):
-            # Move to device
-            images = [img.to(self.device) for img in images]
+        # Get predictions (no targets for inference)
+        outputs = self.forward(images)
+        
+        # Store predictions for COCO evaluation
+        batch_predictions = []
+        
+        # Process each image
+        for i, output in enumerate(outputs):
+            # Get original image ID from target
+            image_id = targets[i]['image_id'].item()
             
-            # Get predictions
-            outputs = self.model(images)
+            # Skip if no predictions or no masks
+            if output['masks'] is None:
+                continue
             
-            batch_size = len(images)
-            total_images += batch_size
-            pbar.set_postfix({
-                'images': f'{total_images}',
-                'predictions': f'{len(predictions)}'
-            })
-            
-            # Process each image
-            for i, output in enumerate(outputs):
-                # Get original image ID from target
-                image_id = targets[i]['image_id'].item()
-                
-                # Count predictions per image
-                num_preds = len(output['boxes'])
-                
-                # Debug logging for first few batches
-                if batch_idx < 5:
-                    if num_preds > 0:
-                        max_score = output['scores'].max().item() if 'scores' in output else 0
-                        label_dist = torch.bincount(output['labels']).tolist() if 'labels' in output else []
-                        self.logger.debug(f"Image {image_id}: {num_preds} detections, max_score: {max_score:.4f}, labels: {label_dist}")
-                    else:
-                        self.logger.debug(f"Image {image_id}: No detections!")
-                
-                # Skip if no predictions or no masks
-                if output['masks'] is None:
+            # Convert predictions to COCO format
+            for j, (box, label, score, mask) in enumerate(zip(
+                output['boxes'].cpu().numpy(),
+                output['labels'].cpu().numpy(),
+                output['scores'].cpu().numpy(),
+                output['masks'].cpu().numpy()
+            )):
+                # Use a very low threshold for debugging
+                if score < 0.001:  # Changed from 0.05 to 0.001 for debugging
                     continue
-                    
-                # Convert predictions to COCO format
-                for j, (box, label, score, mask) in enumerate(zip(
-                    output['boxes'].cpu().numpy(),
-                    output['labels'].cpu().numpy(),
-                    output['scores'].cpu().numpy(),
-                    output['masks'].cpu().numpy()
-                )):
-                    # Use a very low threshold for debugging
-                    if score < 0.001:  # Changed from 0.05 to 0.001 for debugging
-                        continue
-                    
-                    # Convert mask to binary format and then to RLE
-                    mask_binary = (mask[0] > 0.5).astype(np.uint8)
-                    
-                    # Convert to RLE using COCO's mask utilities
-                    rle = maskUtils.encode(np.asfortranarray(mask_binary))
-                    if rle is not None and 'counts' in rle:
-                        rle['counts'] = rle['counts'].decode('utf-8')  # Convert bytes to string
-                    else:
-                        # Skip this prediction if mask encoding failed
-                        continue
-                    
-                    # Get bounding box in COCO format [x, y, width, height]
-                    x1, y1, x2, y2 = box
-                    bbox = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
-                    
-                    predictions.append({
-                        'image_id': int(image_id),
-                        'category_id': int(label),
-                        'bbox': bbox,
-                        'score': float(score),
-                        'segmentation': rle  # RLE format
-                    })
+                
+                # Convert mask to binary format and then to RLE
+                mask_binary = (mask[0] > 0.5).astype(np.uint8)
+                
+                # Convert to RLE using COCO's mask utilities
+                rle = maskUtils.encode(np.asfortranarray(mask_binary))
+                if rle is not None and 'counts' in rle:
+                    rle['counts'] = rle['counts'].decode('utf-8')  # Convert bytes to string
+                else:
+                    # Skip this prediction if mask encoding failed
+                    continue
+                
+                # Get bounding box in COCO format [x, y, width, height]
+                x1, y1, x2, y2 = box
+                bbox = [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
+                
+                batch_predictions.append({
+                    'image_id': int(image_id),
+                    'category_id': int(label),
+                    'bbox': bbox,
+                    'score': float(score),
+                    'segmentation': rle  # RLE format
+                })
+        
+        self.validation_outputs.extend(batch_predictions)
+        
+        # Return a dummy value for Lightning
+        return {'predictions': len(batch_predictions)}
+    
+    def on_validation_epoch_end(self):
+        """Run COCO evaluation at the end of validation epoch."""
+        if not self.validation_outputs:
+            print("No validation predictions to evaluate")
+            return
+        
+        # Save predictions for evaluation
+        predictions = self.validation_outputs
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pred_file = Path(f'predictions_epoch_{self.current_epoch}_{timestamp}.json')
+        
+        print(f"Saving {len(predictions)} predictions to {pred_file}")
+        with open(pred_file, 'w') as f:
+            json.dump(predictions, f)
         
         # If no predictions, return zeros
         if not predictions:
-            self.logger.warning("No predictions made! Returning zero metrics.")
-            return {
+            print("No predictions made! Returning zero metrics.")
+            metrics = {
                 'mAP': 0.0,
                 'mAP50': 0.0,
                 'mAP75': 0.0,
@@ -339,270 +305,63 @@ class IterationBasedTrainer:
                 'mAP_medium': 0.0,
                 'mAP_large': 0.0
             }
-        
-        self.logger.info(f"Collected {len(predictions)} predictions across {total_images} images")
-        
-        # Save predictions for evaluation
-        pred_file = self.run_dir / f'predictions_step_{self.global_step}.json'
-        self.logger.info(f"Saving predictions to {pred_file}")
-        with open(pred_file, 'w') as f:
-            json.dump(predictions, f)
-        
-        # Load predictions as COCO result
-        self.logger.info("Loading predictions for COCO evaluation...")
-        coco_dt = self.val_coco.loadRes(str(pred_file))
-        
-        # Run COCO evaluation
-        self.logger.info("Running COCO bounding box evaluation...")
-        coco_eval = COCOeval(self.val_coco, coco_dt, 'bbox')
-        self.logger.info("  - Evaluating detections...")
-        coco_eval.evaluate()
-        self.logger.info("  - Accumulating results...")
-        coco_eval.accumulate()
-        self.logger.info("  - Computing metrics...")
-        coco_eval.summarize()
-        
-        # Extract metrics
-        metrics = {
-            'mAP': coco_eval.stats[0],  # AP @ IoU=0.50:0.95
-            'mAP50': coco_eval.stats[1],  # AP @ IoU=0.50
-            'mAP75': coco_eval.stats[2],  # AP @ IoU=0.75
-            'mAP_small': coco_eval.stats[3],  # AP for small objects
-            'mAP_medium': coco_eval.stats[4],  # AP for medium objects
-            'mAP_large': coco_eval.stats[5],  # AP for large objects
-        }
-        
-        # Also run segmentation evaluation if available
-        try:
-            self.logger.info("Running COCO segmentation evaluation...")
-            coco_eval_seg = COCOeval(self.val_coco, coco_dt, 'segm')
-            self.logger.info("  - Evaluating segmentations...")
-            coco_eval_seg.evaluate()
-            self.logger.info("  - Accumulating results...")
-            coco_eval_seg.accumulate()
-            self.logger.info("  - Computing metrics...")
-            coco_eval_seg.summarize()
+        else:
+            print(f"Running COCO evaluation with {len(predictions)} predictions...")
             
-            metrics.update({
-                'mAP_seg': coco_eval_seg.stats[0],
-                'mAP50_seg': coco_eval_seg.stats[1],
-                'mAP75_seg': coco_eval_seg.stats[2],
-            })
-        except Exception as e:
-            # If segmentation evaluation fails, just skip it
-            self.logger.warning(f"Segmentation evaluation failed: {e}")
-            pass
-        
-        return metrics
-    
-    def save_checkpoint(self, metrics: Dict[str, float], is_best: bool = False):
-        """Save model checkpoint."""
-        checkpoint = {
-            'global_step': self.global_step,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-            'train_history': self.train_history,
-            'val_history': self.val_history,
-            'best_mAP': self.best_mAP,
-            'metrics': metrics
-        }
-        
-        # Include mAP50 in filename if available
-        map50_str = ""
-        if metrics and 'mAP50' in metrics:
-            map50_str = f"_map50_{metrics['mAP50']:.4f}"
-        
-        # Save regular checkpoint
-        checkpoint_path = self.run_dir / f"checkpoint_step_{self.global_step}{map50_str}.pth"
-        torch.save(checkpoint, checkpoint_path)
-        
-        # Also save just the model weights separately (for easier inference loading)
-        weights_path = self.run_dir / f"model_weights_step_{self.global_step}{map50_str}.pth"
-        torch.save(self.model.state_dict(), weights_path)
-        self.logger.info(f"Saved checkpoint and model weights at step {self.global_step} with mAP50: {metrics.get('mAP50', 0.0):.4f}")
-        
-        # Save best checkpoint
-        if is_best:
-            best_path = self.run_dir / f"best{map50_str}.pth"
-            torch.save(checkpoint, best_path)
+            # Load predictions as COCO result
+            coco_dt = self.val_coco.loadRes(str(pred_file))
             
-            # Also save best model weights separately
-            best_weights_path = self.run_dir / f"best_model_weights{map50_str}.pth"
-            torch.save(self.model.state_dict(), best_weights_path)
-            self.logger.info(f"Saved best model with mAP: {self.best_mAP:.4f}, mAP50: {metrics.get('mAP50', 0.0):.4f}")
-    
-    def train(self):
-        """Run the complete training loop."""
-        self.logger.info(f"Starting training on device: {self.device}")
-        self.logger.info(f"Run directory: {self.run_dir}")
-        self.logger.info(f"Number of training samples: {len(self.train_loader.dataset)}")
-        self.logger.info(f"Number of validation samples: {len(self.val_loader.dataset)}")
-        self.logger.info(f"Validation starts after {self.config.validation_start_step} training steps")
-        self.logger.info(f"Running validation every {self.config.steps_per_validation} steps thereafter")
-        
-        # Save run configuration
-        # Convert Path objects to strings for JSON serialization
-        config_dict = self.config.model_dump()
-        for key, value in config_dict.items():
-            if isinstance(value, Path):
-                config_dict[key] = str(value)
-        
-        run_info = {
-            "start_timestamp": self.run_timestamp,
-            "config": config_dict,
-            "num_train_samples": len(self.train_loader.dataset),
-            "num_val_samples": len(self.val_loader.dataset),
-            "device": str(self.device)
-        }
-        with open(self.run_dir / "run_info.json", "w") as f:
-            json.dump(run_info, f, indent=2)
-        
-        epoch = 0
-        
-        while epoch < self.config.num_epochs:
-            epoch_start_time = time.time()
-            epoch_losses = {
-                'loss': [],
-                'rpn_cls_loss': [],
-                'rpn_bbox_loss': [],
-                'roi_cls_loss': [],
-                'roi_bbox_loss': [],
-                'roi_mask_loss': [],
-                'memory_mb': [],
-                'gpu_utilization': []
+            # Run COCO evaluation
+            coco_eval = COCOeval(self.val_coco, coco_dt, 'bbox')
+            coco_eval.evaluate()
+            coco_eval.accumulate()
+            coco_eval.summarize()
+            
+            # Extract metrics
+            metrics = {
+                'mAP': coco_eval.stats[0],
+                'mAP50': coco_eval.stats[1],
+                'mAP75': coco_eval.stats[2],
+                'mAP_small': coco_eval.stats[3],
+                'mAP_medium': coco_eval.stats[4],
+                'mAP_large': coco_eval.stats[5],
             }
             
-            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.num_epochs}")
-            
-            for batch_idx, (images, targets) in enumerate(pbar):
-                # Training step
-                loss_values = self.train_step(images, targets)
+            # Also run segmentation evaluation if available
+            try:
+                coco_eval_seg = COCOeval(self.val_coco, coco_dt, 'segm')
+                coco_eval_seg.evaluate()
+                coco_eval_seg.accumulate()
+                coco_eval_seg.summarize()
                 
-                # Check if this is an error or successful training step
-                if 'error_type' in loss_values:
-                    # This is an error - log it and skip this batch
-                    self.log_error_to_csv(epoch, batch_idx, loss_values, targets)
-                    self.logger.warning(f"Skipping batch {batch_idx} due to error: {loss_values['error_message']}")
-                    continue
-                
-                # Record losses (only for successful steps)
-                for key in epoch_losses:
-                    if key == 'loss':
-                        epoch_losses[key].append(loss_values['total'])
-                    elif key in ['memory_mb', 'gpu_utilization']:
-                        epoch_losses[key].append(loss_values.get(key, 0.0))
-                    else:
-                        epoch_losses[key].append(loss_values.get(key, 0.0))
-                
-                # Update progress bar (only if we have valid losses)
-                if epoch_losses['loss']:  # Check if we have any successful steps
-                    latest_loss = epoch_losses['loss'][-1]
-                    mem_mb = epoch_losses['memory_mb'][-1] if epoch_losses['memory_mb'] else 0
-                    gpu_util = epoch_losses['gpu_utilization'][-1] if epoch_losses['gpu_utilization'] else -1
-                    gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
-                    
-                    if self.scheduler:
-                        pbar.set_postfix({
-                            'loss': f'{latest_loss:.4f}',
-                            'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
-                            'mem': f'{mem_mb:.0f}MB',
-                            'gpu': gpu_str
-                        })
-                    else:
-                        pbar.set_postfix({
-                            'loss': f'{latest_loss:.4f}',
-                            'lr': f'{self.config.lr:.2e}',
-                            'mem': f'{mem_mb:.0f}MB',
-                        'gpu': gpu_str
-                    })
-                
-                # Log every N steps
-                if self.global_step % self.config.log_interval == 0:
-                    avg_loss = np.mean(epoch_losses['loss'][-self.config.log_interval:])
-                    # Calculate average GPU utilization over last N steps
-                    recent_gpu = epoch_losses['gpu_utilization'][-self.config.log_interval:]
-                    avg_gpu = np.mean([g for g in recent_gpu if g >= 0]) if recent_gpu else -1
-                    
-                    gpu_util = loss_values.get('gpu_utilization', -1)
-                    gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
-                    avg_gpu_str = f'{avg_gpu:.0f}%' if avg_gpu >= 0 else 'N/A'
-                    
-                    self.logger.info(f"Step {self.global_step}, Loss: {avg_loss:.4f}, Memory: {loss_values['memory_mb']:.0f}MB, " +
-                          f"GPU: {gpu_str} (avg: {avg_gpu_str})")
-                
-                # Run validation every N steps after initial training period
-                if (self.global_step >= self.config.validation_start_step and 
-                    self.global_step % self.config.steps_per_validation == 0):
-                    self.logger.info(f"{'='*60}")
-                    self.logger.info(f"VALIDATION at step {self.global_step}")
-                    self.logger.info(f"{'='*60}")
-                    
-                    val_start_time = time.time()
-                    
-                    # Run COCO evaluation
-                    eval_start_time = time.time()
-                    coco_metrics = self.evaluate_coco()
-                    eval_end_time = time.time()
-                    self.logger.info(f"COCO evaluation took {eval_end_time - eval_start_time:.1f}s")
-                    
-                    # Print metrics
-                    self.logger.info("\nValidation Results Summary:")
-                    self.logger.info(f"  Detection mAP: {coco_metrics['mAP']:.4f}")
-                    self.logger.info(f"  Detection mAP50: {coco_metrics['mAP50']:.4f}")
-                    self.logger.info(f"  Detection mAP75: {coco_metrics['mAP75']:.4f}")
-                    self.logger.info(f"  mAP small: {coco_metrics['mAP_small']:.4f}")
-                    self.logger.info(f"  mAP medium: {coco_metrics['mAP_medium']:.4f}")
-                    self.logger.info(f"  mAP large: {coco_metrics['mAP_large']:.4f}")
-                    if 'mAP_seg' in coco_metrics:
-                        self.logger.info(f"  Segmentation mAP: {coco_metrics['mAP_seg']:.4f}")
-                        self.logger.info(f"  Segmentation mAP50: {coco_metrics['mAP50_seg']:.4f}")
-                        self.logger.info(f"  Segmentation mAP75: {coco_metrics['mAP75_seg']:.4f}")
-                    
-                    # Update history
-                    for key, value in coco_metrics.items():
-                        if key in self.val_history:
-                            self.val_history[key].append(value)
-                    
-                    # Save checkpoint
-                    is_best = coco_metrics['mAP'] > self.best_mAP
-                    if is_best:
-                        self.best_mAP = coco_metrics['mAP']
-                        self.logger.info(f"New best mAP: {self.best_mAP:.4f}")
-                    
-                    self.save_checkpoint(coco_metrics, is_best)
-                    
-                    val_end_time = time.time()
-                    self.logger.info(f"Total validation time: {val_end_time - val_start_time:.1f}s")
-                    self.logger.info(f"{'='*60}")
-                
-                self.global_step += 1
-            
-            # Update epoch-level history
-            avg_losses = {key: np.mean(values) for key, values in epoch_losses.items()}
-            for key, value in avg_losses.items():
-                self.train_history[key].append(value)
-            
-            # End of epoch summary
-            epoch_time = time.time() - epoch_start_time
-            avg_gpu = np.mean([g for g in epoch_losses['gpu_utilization'] if g >= 0])
-            self.logger.info(f"Epoch {epoch+1} Summary:")
-            self.logger.info(f"  Time: {epoch_time:.1f}s")
-            self.logger.info(f"  Steps: {len(epoch_losses['loss'])}")
-            self.logger.info(f"  Avg Loss: {avg_losses['loss']:.4f}")
-            self.logger.info(f"  Avg GPU: {avg_gpu:.0f}%")
-            self.logger.info(f"  Avg Memory: {avg_losses['memory_mb']:.0f}MB")
-            self.logger.info(f"  Steps/sec: {len(epoch_losses['loss'])/epoch_time:.2f}")
-            
-            epoch += 1
+                metrics.update({
+                    'mAP_seg': coco_eval_seg.stats[0],
+                    'mAP50_seg': coco_eval_seg.stats[1],
+                    'mAP75_seg': coco_eval_seg.stats[2],
+                })
+            except Exception as e:
+                print(f"Segmentation evaluation failed: {e}")
         
-        self.logger.info("Training completed!")
-        self.logger.info(f"Best mAP: {self.best_mAP:.4f}")
+        # Log metrics to TensorBoard
+        for metric_name, metric_value in metrics.items():
+            self.log(f'val/{metric_name}', metric_value, on_epoch=True, sync_dist=True)
         
-        # Save final model
-        final_path = self.config.checkpoint_dir / "final.pth"
-        torch.save(self.model.state_dict(), final_path)
-        self.logger.info(f"Saved final model to {final_path}")
+        # Clear validation outputs for next epoch
+        self.validation_outputs = []
+        
+        # Print metrics
+        print("\nValidation Results Summary:")
+        print(f"  Detection mAP: {metrics['mAP']:.4f}")
+        print(f"  Detection mAP50: {metrics['mAP50']:.4f}")
+        print(f"  Detection mAP75: {metrics['mAP75']:.4f}")
+        print(f"  mAP small: {metrics['mAP_small']:.4f}")
+        print(f"  mAP medium: {metrics['mAP_medium']:.4f}")
+        print(f"  mAP large: {metrics['mAP_large']:.4f}")
+        if 'mAP_seg' in metrics:
+            print(f"  Segmentation mAP: {metrics['mAP_seg']:.4f}")
+            print(f"  Segmentation mAP50: {metrics['mAP50_seg']:.4f}")
+            print(f"  Segmentation mAP75: {metrics['mAP75_seg']:.4f}")
+    
     
 
 
@@ -628,13 +387,13 @@ def main(config_path: Optional[str] = None):
     logger = setup_logger(
         name="train",
         log_dir=str(log_dir),
-        level="DEBUG"  # Changed from INFO to DEBUG to see debug messages
+        level="DEBUG"
     )
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
+    logger.info(f"Using PyTorch Lightning + TensorBoard")
     
     # Create datasets
+    logger.info("Creating datasets...")
     train_dataset = CocoDataset(
         root_dir=str(config.img_root),
         annotation_file=str(config.train_ann),
@@ -658,7 +417,8 @@ def main(config_path: Optional[str] = None):
         batch_size=config.train_batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True
     )
     
     val_loader = DataLoader(
@@ -666,39 +426,100 @@ def main(config_path: Optional[str] = None):
         batch_size=config.val_batch_size,
         shuffle=False,
         num_workers=config.num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True
     )
     
     # Create COCO object for validation
     val_coco = COCO(str(config.val_ann))
     
-    # Create model
-    model = SwinMaskRCNN(
-        num_classes=config.num_classes,
-        frozen_backbone_stages=config.frozen_backbone_stages  # Use the frozen stages from config
-    )
-    model.logger = logger  # Add logger to model for debug output
-    model.roi_head.logger = logger  # Add logger to ROI head for debug output
-    
-    # Load pretrained weights if specified
-    if config.pretrained_backbone and config.pretrained_checkpoint_url:
-        logger.info(f"Loading pretrained weights from {config.pretrained_checkpoint_url}")
-        load_pretrained_from_url(model, config.pretrained_checkpoint_url, strict=False)
-    
-    model = model.to(device)
-    
-    # Create trainer
-    trainer = IterationBasedTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        val_coco=val_coco,
+    # Create Lightning module
+    logger.info("Creating Lightning module...")
+    lightning_model = MaskRCNNLightningModule(
         config=config,
-        logger=logger
+        val_coco=val_coco
     )
+    
+    # Create run-specific directory with timestamp
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = config.checkpoint_dir / f"run_{run_timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create empty marker file to avoid Lightning warning
+    (run_dir / ".lightning_save_marker").touch()
+    
+    # Setup TensorBoard logger
+    tb_logger = TensorBoardLogger(
+        save_dir=str(config.checkpoint_dir),
+        name="tensorboard",
+        version=run_timestamp
+    )
+    
+    # Setup callbacks
+    callbacks = [
+        ModelCheckpoint(
+            dirpath=str(run_dir),
+            filename='checkpoint-{epoch:02d}-{step}-{val/mAP:.4f}',
+            monitor='val/mAP',
+            mode='max',
+            save_top_k=3,
+            save_last=True
+        ),
+        LearningRateMonitor(logging_interval='step')
+    ]
+    
+    # Create trainer with validation interval
+    val_check_interval = config.steps_per_validation if hasattr(config, 'steps_per_validation') else 1.0
+    
+    trainer = pl.Trainer(
+        max_epochs=config.num_epochs,
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
+        logger=tb_logger,
+        callbacks=callbacks,
+        val_check_interval=val_check_interval,
+        log_every_n_steps=config.log_interval,
+        gradient_clip_val=config.clip_grad_norm if config.clip_grad_norm > 0 else None,
+        precision="16-mixed" if config.use_amp else 32,
+        enable_progress_bar=True,
+        enable_model_summary=True
+    )
+    
+    # Save run configuration
+    config_dict = config.model_dump()
+    for key, value in config_dict.items():
+        if isinstance(value, Path):
+            config_dict[key] = str(value)
+    
+    run_info = {
+        "start_timestamp": run_timestamp,
+        "config": config_dict,
+        "num_train_samples": len(train_dataset),
+        "num_val_samples": len(val_dataset),
+        "device": str(trainer.device_ids),
+        "tensorboard_dir": tb_logger.log_dir
+    }
+    with open(run_dir / "run_info.json", "w") as f:
+        json.dump(run_info, f, indent=2)
+    
+    logger.info(f"Run directory: {run_dir}")
+    logger.info(f"TensorBoard logs: {tb_logger.log_dir}")
+    logger.info(f"To monitor training: tensorboard --logdir {config.checkpoint_dir / 'tensorboard'}")
     
     # Train
-    trainer.train()
+    logger.info("Starting training...")
+    trainer.fit(
+        model=lightning_model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader
+    )
+    
+    logger.info("Training completed!")
+    
+    # Save final model weights
+    final_path = run_dir / "final_model_weights.pth"
+    torch.save(lightning_model.model.state_dict(), final_path)
+    logger.info(f"Saved final model weights to {final_path}")
 
 
 if __name__ == '__main__':
