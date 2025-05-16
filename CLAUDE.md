@@ -2,6 +2,9 @@
 
 This file contains project-specific instructions for working with the SWIN Mask R-CNN codebase.
 
+Any change to training should be performed on train.py, don't create a new script unless explicitly asked.
+For each new feature request, create a branch, and create a PR.
+
 ## Project Overview
 
 This is an isolated implementation of SWIN-based Mask R-CNN without dependencies on mmcv, mmengine, or mmdetection packages. The goal is to provide a clean, standalone implementation that's easy to understand and modify.
