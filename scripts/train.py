@@ -21,6 +21,7 @@ from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.utils.collate import collate_fn
 from scripts.config import TrainingConfig
 from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
+from swin_maskrcnn.utils.logging import setup_logger
 
 
 def get_gpu_memory_mb():
@@ -67,7 +68,8 @@ class IterationBasedTrainer:
         val_loader,
         val_coco,  # COCO object for validation
         config: TrainingConfig,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        logger = None
     ):
         self.model = model
         self.train_loader = train_loader
@@ -75,6 +77,7 @@ class IterationBasedTrainer:
         self.val_coco = val_coco
         self.config = config
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.logger = logger
         
         # Move model to device
         self.model.to(self.device)
@@ -192,7 +195,7 @@ class IterationBasedTrainer:
     @torch.no_grad()
     def evaluate_coco(self) -> Dict[str, float]:
         """Evaluate model using COCO metrics."""
-        print("\nStarting COCO evaluation...")
+        self.logger.info("Starting COCO evaluation...")
         self.model.eval()
         
         predictions: list[Dict[str, Any]] = []
@@ -222,6 +225,7 @@ class IterationBasedTrainer:
                 num_preds = len(output['boxes'])
                 if num_preds > 0:
                     pbar.set_description(f"Evaluating (image {image_id}, {num_preds} detections)")
+                    self.logger.debug(f"Image {image_id}: {num_preds} detections")
                 
                 # Skip if no predictions or no masks
                 if output['masks'] is None:
@@ -263,7 +267,7 @@ class IterationBasedTrainer:
         
         # If no predictions, return zeros
         if not predictions:
-            print("Warning: No predictions made! Returning zero metrics.")
+            self.logger.warning("No predictions made! Returning zero metrics.")
             return {
                 'mAP': 0.0,
                 'mAP50': 0.0,
@@ -273,26 +277,26 @@ class IterationBasedTrainer:
                 'mAP_large': 0.0
             }
         
-        print(f"\nCollected {len(predictions)} predictions across {total_images} images")
+        self.logger.info(f"Collected {len(predictions)} predictions across {total_images} images")
         
         # Save predictions for evaluation
         pred_file = self.config.checkpoint_dir / f'predictions_step_{self.global_step}.json'
-        print(f"Saving predictions to {pred_file}")
+        self.logger.info(f"Saving predictions to {pred_file}")
         with open(pred_file, 'w') as f:
             json.dump(predictions, f)
         
         # Load predictions as COCO result
-        print("Loading predictions for COCO evaluation...")
+        self.logger.info("Loading predictions for COCO evaluation...")
         coco_dt = self.val_coco.loadRes(str(pred_file))
         
         # Run COCO evaluation
-        print("Running COCO bounding box evaluation...")
+        self.logger.info("Running COCO bounding box evaluation...")
         coco_eval = COCOeval(self.val_coco, coco_dt, 'bbox')
-        print("  - Evaluating detections...")
+        self.logger.info("  - Evaluating detections...")
         coco_eval.evaluate()
-        print("  - Accumulating results...")
+        self.logger.info("  - Accumulating results...")
         coco_eval.accumulate()
-        print("  - Computing metrics...")
+        self.logger.info("  - Computing metrics...")
         coco_eval.summarize()
         
         # Extract metrics
@@ -307,13 +311,13 @@ class IterationBasedTrainer:
         
         # Also run segmentation evaluation if available
         try:
-            print("\nRunning COCO segmentation evaluation...")
+            self.logger.info("Running COCO segmentation evaluation...")
             coco_eval_seg = COCOeval(self.val_coco, coco_dt, 'segm')
-            print("  - Evaluating segmentations...")
+            self.logger.info("  - Evaluating segmentations...")
             coco_eval_seg.evaluate()
-            print("  - Accumulating results...")
+            self.logger.info("  - Accumulating results...")
             coco_eval_seg.accumulate()
-            print("  - Computing metrics...")
+            self.logger.info("  - Computing metrics...")
             coco_eval_seg.summarize()
             
             metrics.update({
@@ -323,7 +327,7 @@ class IterationBasedTrainer:
             })
         except Exception as e:
             # If segmentation evaluation fails, just skip it
-            print(f"Segmentation evaluation failed: {e}")
+            self.logger.warning(f"Segmentation evaluation failed: {e}")
             pass
         
         return metrics
@@ -349,15 +353,15 @@ class IterationBasedTrainer:
         if is_best:
             best_path = self.config.checkpoint_dir / "best.pth"
             torch.save(checkpoint, best_path)
-            print(f"Saved best model with mAP: {self.best_mAP:.4f}")
+            self.logger.info(f"Saved best model with mAP: {self.best_mAP:.4f}")
     
     def train(self):
         """Run the complete training loop."""
-        print(f"Starting training on device: {self.device}")
-        print(f"Number of training samples: {len(self.train_loader.dataset)}")
-        print(f"Number of validation samples: {len(self.val_loader.dataset)}")
-        print(f"Validation starts after {self.config.validation_start_step} training steps")
-        print(f"Running validation every {self.config.steps_per_validation} steps thereafter")
+        self.logger.info(f"Starting training on device: {self.device}")
+        self.logger.info(f"Number of training samples: {len(self.train_loader.dataset)}")
+        self.logger.info(f"Number of validation samples: {len(self.val_loader.dataset)}")
+        self.logger.info(f"Validation starts after {self.config.validation_start_step} training steps")
+        self.logger.info(f"Running validation every {self.config.steps_per_validation} steps thereafter")
         
         epoch = 0
         
@@ -419,15 +423,15 @@ class IterationBasedTrainer:
                     gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
                     avg_gpu_str = f'{avg_gpu:.0f}%' if avg_gpu >= 0 else 'N/A'
                     
-                    print(f"\nStep {self.global_step}, Loss: {avg_loss:.4f}, Memory: {loss_values['memory_mb']:.0f}MB, " +
+                    self.logger.info(f"Step {self.global_step}, Loss: {avg_loss:.4f}, Memory: {loss_values['memory_mb']:.0f}MB, " +
                           f"GPU: {gpu_str} (avg: {avg_gpu_str})")
                 
                 # Run validation every N steps after initial training period
                 if (self.global_step >= self.config.validation_start_step and 
                     self.global_step % self.config.steps_per_validation == 0):
-                    print(f"\n{'='*60}")
-                    print(f"VALIDATION at step {self.global_step}")
-                    print(f"{'='*60}")
+                    self.logger.info(f"{'='*60}")
+                    self.logger.info(f"VALIDATION at step {self.global_step}")
+                    self.logger.info(f"{'='*60}")
                     
                     val_start_time = time.time()
                     
@@ -435,20 +439,20 @@ class IterationBasedTrainer:
                     eval_start_time = time.time()
                     coco_metrics = self.evaluate_coco()
                     eval_end_time = time.time()
-                    print(f"COCO evaluation took {eval_end_time - eval_start_time:.1f}s")
+                    self.logger.info(f"COCO evaluation took {eval_end_time - eval_start_time:.1f}s")
                     
                     # Print metrics
-                    print("\nValidation Results Summary:")
-                    print(f"  Detection mAP: {coco_metrics['mAP']:.4f}")
-                    print(f"  Detection mAP50: {coco_metrics['mAP50']:.4f}")
-                    print(f"  Detection mAP75: {coco_metrics['mAP75']:.4f}")
-                    print(f"  mAP small: {coco_metrics['mAP_small']:.4f}")
-                    print(f"  mAP medium: {coco_metrics['mAP_medium']:.4f}")
-                    print(f"  mAP large: {coco_metrics['mAP_large']:.4f}")
+                    self.logger.info("\nValidation Results Summary:")
+                    self.logger.info(f"  Detection mAP: {coco_metrics['mAP']:.4f}")
+                    self.logger.info(f"  Detection mAP50: {coco_metrics['mAP50']:.4f}")
+                    self.logger.info(f"  Detection mAP75: {coco_metrics['mAP75']:.4f}")
+                    self.logger.info(f"  mAP small: {coco_metrics['mAP_small']:.4f}")
+                    self.logger.info(f"  mAP medium: {coco_metrics['mAP_medium']:.4f}")
+                    self.logger.info(f"  mAP large: {coco_metrics['mAP_large']:.4f}")
                     if 'mAP_seg' in coco_metrics:
-                        print(f"  Segmentation mAP: {coco_metrics['mAP_seg']:.4f}")
-                        print(f"  Segmentation mAP50: {coco_metrics['mAP50_seg']:.4f}")
-                        print(f"  Segmentation mAP75: {coco_metrics['mAP75_seg']:.4f}")
+                        self.logger.info(f"  Segmentation mAP: {coco_metrics['mAP_seg']:.4f}")
+                        self.logger.info(f"  Segmentation mAP50: {coco_metrics['mAP50_seg']:.4f}")
+                        self.logger.info(f"  Segmentation mAP75: {coco_metrics['mAP75_seg']:.4f}")
                     
                     # Update history
                     for key, value in coco_metrics.items():
@@ -459,13 +463,13 @@ class IterationBasedTrainer:
                     is_best = coco_metrics['mAP'] > self.best_mAP
                     if is_best:
                         self.best_mAP = coco_metrics['mAP']
-                        print(f"New best mAP: {self.best_mAP:.4f}")
+                        self.logger.info(f"New best mAP: {self.best_mAP:.4f}")
                     
                     self.save_checkpoint(coco_metrics, is_best)
                     
                     val_end_time = time.time()
-                    print(f"\nTotal validation time: {val_end_time - val_start_time:.1f}s")
-                    print(f"{'='*60}\n")
+                    self.logger.info(f"Total validation time: {val_end_time - val_start_time:.1f}s")
+                    self.logger.info(f"{'='*60}")
                 
                 self.global_step += 1
             
@@ -477,23 +481,23 @@ class IterationBasedTrainer:
             # End of epoch summary
             epoch_time = time.time() - epoch_start_time
             avg_gpu = np.mean([g for g in epoch_losses['gpu_utilization'] if g >= 0])
-            print(f"\nEpoch {epoch+1} Summary:")
-            print(f"  Time: {epoch_time:.1f}s")
-            print(f"  Steps: {len(epoch_losses['loss'])}")
-            print(f"  Avg Loss: {avg_losses['loss']:.4f}")
-            print(f"  Avg GPU: {avg_gpu:.0f}%")
-            print(f"  Avg Memory: {avg_losses['memory_mb']:.0f}MB")
-            print(f"  Steps/sec: {len(epoch_losses['loss'])/epoch_time:.2f}")
+            self.logger.info(f"Epoch {epoch+1} Summary:")
+            self.logger.info(f"  Time: {epoch_time:.1f}s")
+            self.logger.info(f"  Steps: {len(epoch_losses['loss'])}")
+            self.logger.info(f"  Avg Loss: {avg_losses['loss']:.4f}")
+            self.logger.info(f"  Avg GPU: {avg_gpu:.0f}%")
+            self.logger.info(f"  Avg Memory: {avg_losses['memory_mb']:.0f}MB")
+            self.logger.info(f"  Steps/sec: {len(epoch_losses['loss'])/epoch_time:.2f}")
             
             epoch += 1
         
-        print("\nTraining completed!")
-        print(f"Best mAP: {self.best_mAP:.4f}")
+        self.logger.info("Training completed!")
+        self.logger.info(f"Best mAP: {self.best_mAP:.4f}")
         
         # Save final model
-        final_path = self.checkpoint_dir / "final.pth"
+        final_path = self.config.checkpoint_dir / "final.pth"
         torch.save(self.model.state_dict(), final_path)
-        print(f"Saved final model to {final_path}")
+        self.logger.info(f"Saved final model to {final_path}")
     
 
 
@@ -514,8 +518,16 @@ def main(config_path: Optional[str] = None):
         # Fallback to default values from TrainingConfig
         config = TrainingConfig()
     
+    # Setup logging
+    log_dir = config.checkpoint_dir / "logs"
+    logger = setup_logger(
+        name="train",
+        log_dir=str(log_dir),
+        level="INFO"
+    )
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
     
     # Create datasets
     train_dataset = CocoDataset(
@@ -532,8 +544,8 @@ def main(config_path: Optional[str] = None):
         mode='train'  # Still use train mode to get targets
     )
     
-    print(f"Training dataset size: {len(train_dataset)}")
-    print(f"Validation dataset size: {len(val_dataset)}")
+    logger.info(f"Training dataset size: {len(train_dataset)}")
+    logger.info(f"Validation dataset size: {len(val_dataset)}")
     
     # Create data loaders
     train_loader = DataLoader(
@@ -563,7 +575,7 @@ def main(config_path: Optional[str] = None):
     
     # Load pretrained weights if specified
     if config.pretrained_backbone and config.pretrained_checkpoint_url:
-        print(f"Loading pretrained weights from {config.pretrained_checkpoint_url}")
+        logger.info(f"Loading pretrained weights from {config.pretrained_checkpoint_url}")
         load_pretrained_from_url(model, config.pretrained_checkpoint_url, strict=False)
     
     model = model.to(device)
@@ -574,7 +586,8 @@ def main(config_path: Optional[str] = None):
         train_loader=train_loader,
         val_loader=val_loader,
         val_coco=val_coco,
-        config=config
+        config=config,
+        logger=logger
     )
     
     # Train

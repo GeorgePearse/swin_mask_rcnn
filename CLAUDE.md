@@ -1,5 +1,7 @@
 # SWIN Mask R-CNN Project Instructions
 
+Always default to writing logs statements instead of using print() 
+
 This file contains project-specific instructions for working with the SWIN Mask R-CNN codebase.
 
 DO NOT CREATE NEW TRAINING SCRIPTS, JUST EDIT TRAIN.PY

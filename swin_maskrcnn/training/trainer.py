@@ -11,6 +11,8 @@ from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Any
+from collections import defaultdict
+from swin_maskrcnn.utils.logging import get_logger
 
 
 class MaskRCNNTrainer:
@@ -27,7 +29,8 @@ class MaskRCNNTrainer:
         clip_grad_norm: float = 10.0,
         checkpoint_dir: str = "./checkpoints",
         log_interval: int = 50,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        logger = None
     ):
         """Initialize the trainer.
         
@@ -53,6 +56,7 @@ class MaskRCNNTrainer:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.log_interval = log_interval
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.logger = logger or get_logger()
         
         # Move model to device
         self.model.to(self.device)
@@ -152,7 +156,7 @@ class MaskRCNNTrainer:
             # Log every N steps
             if self.global_step % self.log_interval == 0:
                 avg_loss = np.mean(epoch_losses['loss'][-self.log_interval:])
-                print(f"Step {self.global_step}, Loss: {avg_loss:.4f}")
+                self.logger.info(f"Step {self.global_step}, Loss: {avg_loss:.4f}")
             
             self.global_step += 1
         
@@ -175,7 +179,7 @@ class MaskRCNNTrainer:
         Returns:
             Dict containing validation metrics
         """
-        print(f"\nStarting validation for epoch {epoch+1}...")
+        self.logger.info(f"Starting validation for epoch {epoch+1}...")
         self.model.eval()
         
         val_losses = []
@@ -208,12 +212,12 @@ class MaskRCNNTrainer:
         self.val_history['loss'].append(avg_val_loss)
         
         # Print detailed loss breakdown
-        print(f"\nValidation results for epoch {epoch+1}:")
-        print(f"  Average loss: {avg_val_loss:.4f}")
-        print(f"  Loss breakdown:")
+        self.logger.info(f"Validation results for epoch {epoch+1}:")
+        self.logger.info(f"  Average loss: {avg_val_loss:.4f}")
+        self.logger.info(f"  Loss breakdown:")
         for key, values in detailed_losses.items():
             avg_loss = np.mean(values)
-            print(f"    {key}: {avg_loss:.4f}")
+            self.logger.info(f"    {key}: {avg_loss:.4f}")
         
         return {'loss': avg_val_loss}
     
@@ -243,7 +247,7 @@ class MaskRCNNTrainer:
         if is_best:
             best_path = self.checkpoint_dir / "best.pth"
             torch.save(checkpoint, best_path)
-            print(f"Saved best model with val_loss: {self.best_val_loss:.4f}")
+            self.logger.info(f"Saved best model with val_loss: {self.best_val_loss:.4f}")
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load model checkpoint.
@@ -261,15 +265,15 @@ class MaskRCNNTrainer:
         self.best_val_loss = checkpoint['best_val_loss']
         self.global_step = checkpoint['global_step']
         
-        print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+        self.logger.info(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         
         return checkpoint['epoch']
     
     def train(self):
         """Run the complete training loop."""
-        print(f"Starting training on device: {self.device}")
-        print(f"Number of training samples: {len(self.train_loader.dataset)}")
-        print(f"Number of validation samples: {len(self.val_loader.dataset)}")
+        self.logger.info(f"Starting training on device: {self.device}")
+        self.logger.info(f"Number of training samples: {len(self.train_loader.dataset)}")
+        self.logger.info(f"Number of validation samples: {len(self.val_loader.dataset)}")
         
         for epoch in range(self.num_epochs):
             # Train for one epoch
@@ -279,18 +283,18 @@ class MaskRCNNTrainer:
             val_metrics = self.validate(epoch)
             
             # Print epoch summary
-            print(f"\n{'='*60}")
-            print(f"EPOCH {epoch+1}/{self.num_epochs} SUMMARY")
-            print(f"{'='*60}")
-            print(f"Train Loss: {train_metrics['loss']:.4f}")
-            print(f"Val Loss: {val_metrics['loss']:.4f}")
-            print(f"Learning Rate: {self.scheduler.get_last_lr()[0]:.2e}")
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"EPOCH {epoch+1}/{self.num_epochs} SUMMARY")
+            self.logger.info(f"{'='*60}")
+            self.logger.info(f"Train Loss: {train_metrics['loss']:.4f}")
+            self.logger.info(f"Val Loss: {val_metrics['loss']:.4f}")
+            self.logger.info(f"Learning Rate: {self.scheduler.get_last_lr()[0]:.2e}")
             
             # Save checkpoint
             is_best = val_metrics['loss'] < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_metrics['loss']
-                print(f">>> NEW BEST VALIDATION LOSS! <<<")
+                self.logger.info(f">>> NEW BEST VALIDATION LOSS! <<<")
             
             self.save_checkpoint(epoch, is_best)
             
@@ -298,13 +302,13 @@ class MaskRCNNTrainer:
             if (epoch + 1) % 5 == 0:
                 self.save_checkpoint(epoch)
         
-        print("\nTraining completed!")
-        print(f"Best validation loss: {self.best_val_loss:.4f}")
+        self.logger.info("\nTraining completed!")
+        self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
         
         # Save final model
         final_path = self.checkpoint_dir / "final.pth"
         torch.save(self.model.state_dict(), final_path)
-        print(f"Saved final model to {final_path}")
+        self.logger.info(f"Saved final model to {final_path}")
     
     def plot_history(self, save_path: Optional[str] = None):
         """Plot training history.

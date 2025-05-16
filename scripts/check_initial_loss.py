@@ -8,10 +8,17 @@ from swin_maskrcnn.utils.collate import collate_fn
 from torch.utils.data import DataLoader
 from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
 from scripts.config import TrainingConfig
+from swin_maskrcnn.utils.logging import setup_logger
 
 
 def check_initial_loss():
     """Check initial loss values with proper initialization."""
+    # Setup logger
+    logger = setup_logger(
+        name="check_initial_loss",
+        level="INFO"
+    )
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Load config
@@ -36,7 +43,7 @@ def check_initial_loss():
     )
     
     # Test model initialization
-    print("Testing model initialization...")
+    logger.info("Testing model initialization...")
     
     # Model without pretrained weights
     model_scratch = SwinMaskRCNN(num_classes=config.num_classes)
@@ -51,48 +58,48 @@ def check_initial_loss():
     model_pretrained.train()
     
     # Test both models on first batch
-    print("\nChecking initial losses...")
+    logger.info("Checking initial losses...")
     batch = next(iter(train_loader))
     images, targets = batch  # unpacking a tuple
     images = [img.to(device) for img in images]
     targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
     
     # Test scratch model
-    print("\nModel from scratch:")
+    logger.info("Model from scratch:")
     losses_scratch = model_scratch(images, targets)
     total_loss_scratch = sum(losses_scratch.values())
-    print(f"  RPN Cls Loss: {losses_scratch.get('rpn_cls_loss', 0):.4f}")
-    print(f"  RPN Bbox Loss: {losses_scratch.get('rpn_bbox_loss', 0):.4f}")
-    print(f"  ROI Cls Loss: {losses_scratch.get('roi_cls_loss', 0):.4f}")
-    print(f"  ROI Bbox Loss: {losses_scratch.get('roi_bbox_loss', 0):.4f}")
-    print(f"  ROI Mask Loss: {losses_scratch.get('roi_mask_loss', 0):.4f}")
-    print(f"  Total Loss: {total_loss_scratch:.4f}")
+    logger.info(f"  RPN Cls Loss: {losses_scratch.get('rpn_cls_loss', 0):.4f}")
+    logger.info(f"  RPN Bbox Loss: {losses_scratch.get('rpn_bbox_loss', 0):.4f}")
+    logger.info(f"  ROI Cls Loss: {losses_scratch.get('roi_cls_loss', 0):.4f}")
+    logger.info(f"  ROI Bbox Loss: {losses_scratch.get('roi_bbox_loss', 0):.4f}")
+    logger.info(f"  ROI Mask Loss: {losses_scratch.get('roi_mask_loss', 0):.4f}")
+    logger.info(f"  Total Loss: {total_loss_scratch:.4f}")
     
     # Test pretrained model
-    print("\nModel with pretrained weights:")
+    logger.info("Model with pretrained weights:")
     losses_pretrained = model_pretrained(images, targets)
     total_loss_pretrained = sum(losses_pretrained.values())
-    print(f"  RPN Cls Loss: {losses_pretrained.get('rpn_cls_loss', 0):.4f}")
-    print(f"  RPN Bbox Loss: {losses_pretrained.get('rpn_bbox_loss', 0):.4f}")
-    print(f"  ROI Cls Loss: {losses_pretrained.get('roi_cls_loss', 0):.4f}")
-    print(f"  ROI Bbox Loss: {losses_pretrained.get('roi_bbox_loss', 0):.4f}")
-    print(f"  ROI Mask Loss: {losses_pretrained.get('roi_mask_loss', 0):.4f}")
-    print(f"  Total Loss: {total_loss_pretrained:.4f}")
+    logger.info(f"  RPN Cls Loss: {losses_pretrained.get('rpn_cls_loss', 0):.4f}")
+    logger.info(f"  RPN Bbox Loss: {losses_pretrained.get('rpn_bbox_loss', 0):.4f}")
+    logger.info(f"  ROI Cls Loss: {losses_pretrained.get('roi_cls_loss', 0):.4f}")
+    logger.info(f"  ROI Bbox Loss: {losses_pretrained.get('roi_bbox_loss', 0):.4f}")
+    logger.info(f"  ROI Mask Loss: {losses_pretrained.get('roi_mask_loss', 0):.4f}")
+    logger.info(f"  Total Loss: {total_loss_pretrained:.4f}")
     
     # Check parameter statistics
-    print("\nParameter statistics (scratch model):")
+    logger.info("Parameter statistics (scratch model):")
     for name, param in model_scratch.named_parameters():
         if 'weight' in name and len(param.shape) >= 2:
-            print(f"  {name}: mean={param.mean():.6f}, std={param.std():.6f}")
+            logger.info(f"  {name}: mean={param.mean():.6f}, std={param.std():.6f}")
     
     # Compare with MMDetection's expected ranges
-    print("\nExpected initial loss ranges from MMDetection:")
-    print("  RPN Cls Loss: ~0.7 (binary cross-entropy)")
-    print("  RPN Bbox Loss: ~1-3")
-    print("  ROI Cls Loss: ~3-4 (depends on num_classes)")
-    print("  ROI Bbox Loss: ~1-2")
-    print("  ROI Mask Loss: ~0.7")
-    print("  Total Loss: ~6-10")
+    logger.info("Expected initial loss ranges from MMDetection:")
+    logger.info("  RPN Cls Loss: ~0.7 (binary cross-entropy)")
+    logger.info("  RPN Bbox Loss: ~1-3")
+    logger.info("  ROI Cls Loss: ~3-4 (depends on num_classes)")
+    logger.info("  ROI Bbox Loss: ~1-2")
+    logger.info("  ROI Mask Loss: ~0.7")
+    logger.info("  Total Loss: ~6-10")
 
 
 if __name__ == '__main__':
