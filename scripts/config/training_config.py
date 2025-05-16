@@ -25,7 +25,8 @@ class TrainingConfig(BaseModel):
     num_classes: int = Field(default=69, description="Number of classes in dataset")
     
     # Training parameters
-    batch_size: int = Field(default=1, description="Batch size for training")
+    train_batch_size: int = Field(default=4, description="Batch size for training")
+    val_batch_size: int = Field(default=8, description="Batch size for validation")
     num_workers: int = Field(default=0, description="Number of data loading workers")
     lr: float = Field(default=1e-4, description="Learning rate")
     momentum: float = Field(default=0.9, description="Momentum for SGD optimizer")
@@ -36,6 +37,10 @@ class TrainingConfig(BaseModel):
     steps_per_validation: int = Field(
         default=200,
         description="Number of training steps between validation runs"
+    )
+    validation_start_step: int = Field(
+        default=1000,
+        description="Number of training steps before starting validation"
     )
     
     # Gradient clipping

@@ -1,7 +1,7 @@
 """Training script with iteration-based validation and COCO metrics."""
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import numpy as np
 import torch
@@ -9,10 +9,11 @@ import torch.nn as nn
 from pycocotools import mask as maskUtils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from torch.optim import AdamW, SGD
+from torch.optim import AdamW, SGD, Optimizer
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import time
 
 from swin_maskrcnn.data.dataset import CocoDataset
 from swin_maskrcnn.data.transforms_simple import get_transform_simple
@@ -20,6 +21,39 @@ from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.utils.collate import collate_fn
 from scripts.config import TrainingConfig
 
+
+def get_gpu_memory_mb():
+    """Get current GPU memory usage in MB."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024**2
+    return 0.0
+
+
+def get_gpu_utilization():
+    """Get current GPU utilization percentage."""
+    if torch.cuda.is_available():
+        try:
+            # Try using pynvml if available
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return utilization.gpu
+        except ImportError:
+            # Fallback: Use nvidia-smi command
+            import subprocess
+            result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                gpu_id = torch.cuda.current_device()
+                lines = result.stdout.strip().split('\n')
+                if gpu_id < len(lines):
+                    return float(lines[gpu_id])
+            # If nvidia-smi fails, return -1 to indicate unavailable
+            return -1.0
+        except Exception:
+            return -1.0
+    return 0.0
 
 
 class IterationBasedTrainer:
@@ -48,6 +82,7 @@ class IterationBasedTrainer:
         self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize optimizer
+        self.optimizer: Optimizer
         if self.config.optimizer == "adamw":
             self.optimizer = AdamW(
                 self.model.parameters(), 
@@ -65,6 +100,7 @@ class IterationBasedTrainer:
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
         
         # Initialize scheduler
+        self.scheduler: Optional[OneCycleLR] = None
         if self.config.use_scheduler:
             total_steps = len(train_loader) * self.config.num_epochs
             self.scheduler = OneCycleLR(
@@ -74,8 +110,6 @@ class IterationBasedTrainer:
                 pct_start=0.05,
                 anneal_strategy='cos'
             )
-        else:
-            self.scheduler = None
         
         # Training history
         self.train_history: Dict[str, list] = {
@@ -84,7 +118,9 @@ class IterationBasedTrainer:
             'rpn_bbox_loss': [],
             'roi_cls_loss': [],
             'roi_bbox_loss': [],
-            'roi_mask_loss': []
+            'roi_mask_loss': [],
+            'memory_mb': [],
+            'gpu_utilization': []
         }
         
         self.val_history: Dict[str, list] = {
@@ -130,6 +166,10 @@ class IterationBasedTrainer:
         loss_values = {k: v.item() for k, v in loss_dict.items()}
         loss_values['total'] = total_loss.item()
         
+        # Add memory usage and GPU utilization
+        loss_values['memory_mb'] = get_gpu_memory_mb()
+        loss_values['gpu_utilization'] = get_gpu_utilization()
+        
         return loss_values
     
     @torch.no_grad()
@@ -138,7 +178,7 @@ class IterationBasedTrainer:
         print("\nStarting COCO evaluation...")
         self.model.eval()
         
-        predictions = []
+        predictions: list[Dict[str, Any]] = []
         total_images = 0
         
         pbar = tqdm(self.val_loader, desc="Evaluating (inference)")
@@ -219,7 +259,7 @@ class IterationBasedTrainer:
         print(f"\nCollected {len(predictions)} predictions across {total_images} images")
         
         # Save predictions for evaluation
-        pred_file = self.checkpoint_dir / f'predictions_step_{self.global_step}.json'
+        pred_file = self.config.checkpoint_dir / f'predictions_step_{self.global_step}.json'
         print(f"Saving predictions to {pred_file}")
         with open(pred_file, 'w') as f:
             json.dump(predictions, f)
@@ -299,18 +339,22 @@ class IterationBasedTrainer:
         print(f"Starting training on device: {self.device}")
         print(f"Number of training samples: {len(self.train_loader.dataset)}")
         print(f"Number of validation samples: {len(self.val_loader.dataset)}")
-        print(f"Running validation every {self.config.steps_per_validation} steps")
+        print(f"Validation starts after {self.config.validation_start_step} training steps")
+        print(f"Running validation every {self.config.steps_per_validation} steps thereafter")
         
         epoch = 0
         
         while epoch < self.config.num_epochs:
+            epoch_start_time = time.time()
             epoch_losses = {
                 'loss': [],
                 'rpn_cls_loss': [],
                 'rpn_bbox_loss': [],
                 'roi_cls_loss': [],
                 'roi_bbox_loss': [],
-                'roi_mask_loss': []
+                'roi_mask_loss': [],
+                'memory_mb': [],
+                'gpu_utilization': []
             }
             
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.num_epochs}")
@@ -323,28 +367,47 @@ class IterationBasedTrainer:
                 for key in epoch_losses:
                     if key == 'loss':
                         epoch_losses[key].append(loss_values['total'])
+                    elif key in ['memory_mb', 'gpu_utilization']:
+                        epoch_losses[key].append(loss_values.get(key, 0.0))
                     else:
                         epoch_losses[key].append(loss_values.get(key, 0.0))
                 
                 # Update progress bar
+                gpu_util = loss_values.get('gpu_utilization', -1)
+                gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
+                
                 if self.scheduler:
                     pbar.set_postfix({
                         'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.scheduler.get_last_lr()[0]:.2e}'
+                        'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
+                        'mem': f'{loss_values["memory_mb"]:.0f}MB',
+                        'gpu': gpu_str
                     })
                 else:
                     pbar.set_postfix({
                         'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.config.lr:.2e}'
+                        'lr': f'{self.config.lr:.2e}',
+                        'mem': f'{loss_values["memory_mb"]:.0f}MB',
+                        'gpu': gpu_str
                     })
                 
                 # Log every N steps
                 if self.global_step % self.config.log_interval == 0:
                     avg_loss = np.mean(epoch_losses['loss'][-self.config.log_interval:])
-                    print(f"\nStep {self.global_step}, Loss: {avg_loss:.4f}")
+                    # Calculate average GPU utilization over last N steps
+                    recent_gpu = epoch_losses['gpu_utilization'][-self.config.log_interval:]
+                    avg_gpu = np.mean([g for g in recent_gpu if g >= 0]) if recent_gpu else -1
+                    
+                    gpu_util = loss_values.get('gpu_utilization', -1)
+                    gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
+                    avg_gpu_str = f'{avg_gpu:.0f}%' if avg_gpu >= 0 else 'N/A'
+                    
+                    print(f"\nStep {self.global_step}, Loss: {avg_loss:.4f}, Memory: {loss_values['memory_mb']:.0f}MB, " +
+                          f"GPU: {gpu_str} (avg: {avg_gpu_str})")
                 
-                # Run validation every N steps
-                if self.global_step > 0 and self.global_step % self.config.steps_per_validation == 0:
+                # Run validation every N steps after initial training period
+                if (self.global_step >= self.config.validation_start_step and 
+                    self.global_step % self.config.steps_per_validation == 0):
                     print(f"\n{'='*60}")
                     print(f"VALIDATION at step {self.global_step}")
                     print(f"{'='*60}")
@@ -394,6 +457,17 @@ class IterationBasedTrainer:
             avg_losses = {key: np.mean(values) for key, values in epoch_losses.items()}
             for key, value in avg_losses.items():
                 self.train_history[key].append(value)
+            
+            # End of epoch summary
+            epoch_time = time.time() - epoch_start_time
+            avg_gpu = np.mean([g for g in epoch_losses['gpu_utilization'] if g >= 0])
+            print(f"\nEpoch {epoch+1} Summary:")
+            print(f"  Time: {epoch_time:.1f}s")
+            print(f"  Steps: {len(epoch_losses['loss'])}")
+            print(f"  Avg Loss: {avg_losses['loss']:.4f}")
+            print(f"  Avg GPU: {avg_gpu:.0f}%")
+            print(f"  Avg Memory: {avg_losses['memory_mb']:.0f}MB")
+            print(f"  Steps/sec: {len(epoch_losses['loss'])/epoch_time:.2f}")
             
             epoch += 1
         
@@ -448,7 +522,7 @@ def main(config_path: Optional[str] = None):
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.batch_size,
+        batch_size=config.train_batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         collate_fn=collate_fn
@@ -456,7 +530,7 @@ def main(config_path: Optional[str] = None):
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.batch_size,
+        batch_size=config.val_batch_size,
         shuffle=False,
         num_workers=config.num_workers,
         collate_fn=collate_fn

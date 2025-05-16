@@ -17,12 +17,12 @@ python scripts/train.py
 To train with a custom YAML configuration file:
 
 ```bash
-python scripts/train.py --config scripts/config/sample_config.yaml
+python scripts/train.py --config scripts/config/config.yaml
 ```
 
 ### Creating Custom Configuration
 
-You can create your own configuration YAML file by copying `sample_config.yaml` and modifying the parameters. All parameters have defaults, so you only need to specify the values you want to change.
+You can create your own configuration YAML file by copying `config.yaml` and modifying the parameters. All parameters have defaults, so you only need to specify the values you want to change.
 
 ## Configuration Parameters
 
@@ -32,10 +32,16 @@ See `training_config.py` for all available parameters and their descriptions.
 
 - `lr`: Learning rate (default: 1e-4)
 - `momentum`: Momentum for SGD optimizer (default: 0.9)
-- `steps_per_validation`: How often to run validation (default: 5)
+- `steps_per_validation`: How often to run validation (default: 200)
+- `validation_start_step`: Number of training steps before starting validation (default: 1000)
 - `optimizer`: Choose between 'adamw' or 'sgd' (default: 'adamw')
 - `num_epochs`: Number of training epochs (default: 12)
-- `batch_size`: Training batch size (default: 1)
+- `train_batch_size`: Training batch size (default: 4)
+- `val_batch_size`: Validation batch size (default: 8)
+
+## Memory Tracking
+
+The training script now logs GPU memory consumption alongside loss values during training. This helps monitor memory usage and optimize batch sizes for your hardware.
 
 ## Example: High Learning Rate SGD
 
@@ -46,6 +52,8 @@ lr: 0.001
 momentum: 0.95
 optimizer: sgd
 steps_per_validation: 10
+train_batch_size: 2
+val_batch_size: 4
 ```
 
 Then run:

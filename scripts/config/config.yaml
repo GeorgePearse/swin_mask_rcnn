@@ -9,7 +9,8 @@ img_root: /home/georgepearse/data/images
 num_classes: 69
 
 # Training parameters
-batch_size: 1
+train_batch_size: 2
+val_batch_size: 4
 num_workers: 0
 lr: 0.0001
 momentum: 0.9
@@ -18,6 +19,7 @@ num_epochs: 12
 
 # Iteration-based validation
 steps_per_validation: 200
+validation_start_step: 1000  # Delay validation until 1000 training steps
 
 # Gradient clipping
 clip_grad_norm: 10.0
