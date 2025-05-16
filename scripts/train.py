@@ -12,6 +12,7 @@ from pycocotools.cocoeval import COCOeval
 from typing import Dict, Any, Optional
 import json
 import time
+from collections import defaultdict
 
 from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
 from swin_maskrcnn.data.dataset import CocoDataset
