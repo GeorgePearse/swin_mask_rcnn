@@ -14,6 +14,8 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
+import csv
+from datetime import datetime
 
 from swin_maskrcnn.data.dataset import CocoDataset
 from swin_maskrcnn.data.transforms_simple import get_transform_simple
@@ -82,8 +84,14 @@ class IterationBasedTrainer:
         # Move model to device
         self.model.to(self.device)
         
-        # Create checkpoint directory
-        self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Create run-specific directory with timestamp
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_dir = self.config.checkpoint_dir / f"run_{self.run_timestamp}"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Log the run directory
+        if self.logger:
+            self.logger.info(f"Created run directory: {self.run_dir}")
         
         # Initialize optimizer
         self.optimizer: Optimizer
@@ -105,6 +113,14 @@ class IterationBasedTrainer:
         
         # Initialize scheduler
         self.scheduler: Optional[OneCycleLR] = None
+        
+        # Initialize CSV logger for problematic images
+        self.error_log_path = self.run_dir / "problematic_images.csv"
+        
+        # Create CSV file with headers
+        with open(self.error_log_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['epoch', 'batch_idx', 'image_filename', 'image_id', 'error_type', 'error_message'])
         if self.config.use_scheduler:
             total_steps = len(train_loader) * self.config.num_epochs
             self.scheduler = OneCycleLR(
@@ -142,55 +158,96 @@ class IterationBasedTrainer:
         self.global_step = 0
         self.best_mAP = 0.0
     
-    def train_step(self, images, targets) -> Dict[str, float]:
-        """Single training step."""
-        self.model.train()
+    def train_step(self, images, targets) -> Optional[Dict[str, float]]:
+        """Single training step. Returns None if an error occurs."""
+        try:
+            self.model.train()
+            
+            # Move to device, preserving string fields
+            images = [img.to(self.device) for img in images]
+            targets_device = []
+            for t in targets:
+                t_device = {}
+                for k, v in t.items():
+                    if isinstance(v, torch.Tensor):
+                        t_device[k] = v.to(self.device)
+                    else:
+                        t_device[k] = v  # Keep string fields (like image_filename) as is
+                targets_device.append(t_device)
+            
+            # Forward pass
+            loss_dict = self.model(images, targets_device)
+            
+            # Apply loss weights (similar to MMDetection)
+            loss_weights = {
+                'rpn_cls_loss': 1.0,
+                'rpn_bbox_loss': 1.0,
+                'roi_cls_loss': 1.0,
+                'roi_bbox_loss': 1.0,
+                'roi_mask_loss': 1.0,
+            }
+            
+            # Weight the losses
+            weighted_losses = {}
+            for k, v in loss_dict.items():
+                weight = loss_weights.get(k, 1.0)
+                weighted_losses[k] = v * weight
+            
+            total_loss = sum(weighted_losses.values())
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            
+            # Gradient clipping
+            if self.config.clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip_grad_norm)
+            
+            self.optimizer.step()
+            if self.scheduler:
+                self.scheduler.step()
+            
+            # Convert losses to dict
+            loss_values = {k: v.item() for k, v in loss_dict.items()}
+            loss_values['total'] = total_loss.item()
+            
+            # Add memory usage and GPU utilization
+            loss_values['memory_mb'] = get_gpu_memory_mb()
+            loss_values['gpu_utilization'] = get_gpu_utilization()
+            
+            return loss_values
         
-        # Move to device
-        images = [img.to(self.device) for img in images]
-        targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
-        
-        # Forward pass
-        loss_dict = self.model(images, targets)
-        
-        # Apply loss weights (similar to MMDetection)
-        loss_weights = {
-            'rpn_cls_loss': 1.0,
-            'rpn_bbox_loss': 1.0,
-            'roi_cls_loss': 1.0,
-            'roi_bbox_loss': 1.0,
-            'roi_mask_loss': 1.0,
-        }
-        
-        # Weight the losses
-        weighted_losses = {}
-        for k, v in loss_dict.items():
-            weight = loss_weights.get(k, 1.0)
-            weighted_losses[k] = v * weight
-        
-        total_loss = sum(weighted_losses.values())
-        
-        # Backward pass
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        
-        # Gradient clipping
-        if self.config.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip_grad_norm)
-        
-        self.optimizer.step()
-        if self.scheduler:
-            self.scheduler.step()
-        
-        # Convert losses to dict
-        loss_values = {k: v.item() for k, v in loss_dict.items()}
-        loss_values['total'] = total_loss.item()
-        
-        # Add memory usage and GPU utilization
-        loss_values['memory_mb'] = get_gpu_memory_mb()
-        loss_values['gpu_utilization'] = get_gpu_utilization()
-        
-        return loss_values
+        except Exception as e:
+            # Log the error with information about the problematic images
+            error_info = {
+                'error_type': type(e).__name__,
+                'error_message': str(e),
+                'targets': targets  # Keep the original targets with filenames
+            }
+            
+            if self.logger:
+                self.logger.warning(f"Error during training step: {e}")
+            
+            return error_info
+    
+    def log_error_to_csv(self, epoch: int, batch_idx: int, error_info: Dict, targets: list):
+        """Log error information to CSV file."""
+        with open(self.error_log_path, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Log error for each image in the batch
+            for target in targets:
+                image_filename = target.get('image_filename', 'unknown')
+                image_id = target.get('image_id', torch.tensor([0])).item() if isinstance(target.get('image_id'), torch.Tensor) else 0
+                
+                writer.writerow([
+                    epoch,
+                    batch_idx,
+                    image_filename,
+                    image_id,
+                    error_info.get('error_type', 'Unknown'),
+                    error_info.get('error_message', 'No message')
+                ])
     
     @torch.no_grad()
     def evaluate_coco(self) -> Dict[str, float]:
@@ -223,9 +280,15 @@ class IterationBasedTrainer:
                 
                 # Count predictions per image
                 num_preds = len(output['boxes'])
-                if num_preds > 0:
-                    pbar.set_description(f"Evaluating (image {image_id}, {num_preds} detections)")
-                    self.logger.debug(f"Image {image_id}: {num_preds} detections")
+                
+                # Debug logging for first few batches
+                if batch_idx < 5:
+                    if num_preds > 0:
+                        max_score = output['scores'].max().item() if 'scores' in output else 0
+                        label_dist = torch.bincount(output['labels']).tolist() if 'labels' in output else []
+                        self.logger.debug(f"Image {image_id}: {num_preds} detections, max_score: {max_score:.4f}, labels: {label_dist}")
+                    else:
+                        self.logger.debug(f"Image {image_id}: No detections!")
                 
                 # Skip if no predictions or no masks
                 if output['masks'] is None:
@@ -238,8 +301,8 @@ class IterationBasedTrainer:
                     output['scores'].cpu().numpy(),
                     output['masks'].cpu().numpy()
                 )):
-                    # Only keep predictions with score > 0.05
-                    if score < 0.05:
+                    # Use a very low threshold for debugging
+                    if score < 0.001:  # Changed from 0.05 to 0.001 for debugging
                         continue
                     
                     # Convert mask to binary format and then to RLE
@@ -280,7 +343,7 @@ class IterationBasedTrainer:
         self.logger.info(f"Collected {len(predictions)} predictions across {total_images} images")
         
         # Save predictions for evaluation
-        pred_file = self.config.checkpoint_dir / f'predictions_step_{self.global_step}.json'
+        pred_file = self.run_dir / f'predictions_step_{self.global_step}.json'
         self.logger.info(f"Saving predictions to {pred_file}")
         with open(pred_file, 'w') as f:
             json.dump(predictions, f)
@@ -345,23 +408,55 @@ class IterationBasedTrainer:
             'metrics': metrics
         }
         
+        # Include mAP50 in filename if available
+        map50_str = ""
+        if metrics and 'mAP50' in metrics:
+            map50_str = f"_map50_{metrics['mAP50']:.4f}"
+        
         # Save regular checkpoint
-        checkpoint_path = self.config.checkpoint_dir / f"checkpoint_step_{self.global_step}.pth"
+        checkpoint_path = self.run_dir / f"checkpoint_step_{self.global_step}{map50_str}.pth"
         torch.save(checkpoint, checkpoint_path)
+        
+        # Also save just the model weights separately (for easier inference loading)
+        weights_path = self.run_dir / f"model_weights_step_{self.global_step}{map50_str}.pth"
+        torch.save(self.model.state_dict(), weights_path)
+        self.logger.info(f"Saved checkpoint and model weights at step {self.global_step} with mAP50: {metrics.get('mAP50', 0.0):.4f}")
         
         # Save best checkpoint
         if is_best:
-            best_path = self.config.checkpoint_dir / "best.pth"
+            best_path = self.run_dir / f"best{map50_str}.pth"
             torch.save(checkpoint, best_path)
-            self.logger.info(f"Saved best model with mAP: {self.best_mAP:.4f}")
+            
+            # Also save best model weights separately
+            best_weights_path = self.run_dir / f"best_model_weights{map50_str}.pth"
+            torch.save(self.model.state_dict(), best_weights_path)
+            self.logger.info(f"Saved best model with mAP: {self.best_mAP:.4f}, mAP50: {metrics.get('mAP50', 0.0):.4f}")
     
     def train(self):
         """Run the complete training loop."""
         self.logger.info(f"Starting training on device: {self.device}")
+        self.logger.info(f"Run directory: {self.run_dir}")
         self.logger.info(f"Number of training samples: {len(self.train_loader.dataset)}")
         self.logger.info(f"Number of validation samples: {len(self.val_loader.dataset)}")
         self.logger.info(f"Validation starts after {self.config.validation_start_step} training steps")
         self.logger.info(f"Running validation every {self.config.steps_per_validation} steps thereafter")
+        
+        # Save run configuration
+        # Convert Path objects to strings for JSON serialization
+        config_dict = self.config.model_dump()
+        for key, value in config_dict.items():
+            if isinstance(value, Path):
+                config_dict[key] = str(value)
+        
+        run_info = {
+            "start_timestamp": self.run_timestamp,
+            "config": config_dict,
+            "num_train_samples": len(self.train_loader.dataset),
+            "num_val_samples": len(self.val_loader.dataset),
+            "device": str(self.device)
+        }
+        with open(self.run_dir / "run_info.json", "w") as f:
+            json.dump(run_info, f, indent=2)
         
         epoch = 0
         
@@ -384,7 +479,14 @@ class IterationBasedTrainer:
                 # Training step
                 loss_values = self.train_step(images, targets)
                 
-                # Record losses
+                # Check if this is an error or successful training step
+                if 'error_type' in loss_values:
+                    # This is an error - log it and skip this batch
+                    self.log_error_to_csv(epoch, batch_idx, loss_values, targets)
+                    self.logger.warning(f"Skipping batch {batch_idx} due to error: {loss_values['error_message']}")
+                    continue
+                
+                # Record losses (only for successful steps)
                 for key in epoch_losses:
                     if key == 'loss':
                         epoch_losses[key].append(loss_values['total'])
@@ -393,22 +495,25 @@ class IterationBasedTrainer:
                     else:
                         epoch_losses[key].append(loss_values.get(key, 0.0))
                 
-                # Update progress bar
-                gpu_util = loss_values.get('gpu_utilization', -1)
-                gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
-                
-                if self.scheduler:
-                    pbar.set_postfix({
-                        'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
-                        'mem': f'{loss_values["memory_mb"]:.0f}MB',
-                        'gpu': gpu_str
-                    })
-                else:
-                    pbar.set_postfix({
-                        'loss': f'{loss_values["total"]:.4f}',
-                        'lr': f'{self.config.lr:.2e}',
-                        'mem': f'{loss_values["memory_mb"]:.0f}MB',
+                # Update progress bar (only if we have valid losses)
+                if epoch_losses['loss']:  # Check if we have any successful steps
+                    latest_loss = epoch_losses['loss'][-1]
+                    mem_mb = epoch_losses['memory_mb'][-1] if epoch_losses['memory_mb'] else 0
+                    gpu_util = epoch_losses['gpu_utilization'][-1] if epoch_losses['gpu_utilization'] else -1
+                    gpu_str = f'{gpu_util:.0f}%' if gpu_util >= 0 else 'N/A'
+                    
+                    if self.scheduler:
+                        pbar.set_postfix({
+                            'loss': f'{latest_loss:.4f}',
+                            'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
+                            'mem': f'{mem_mb:.0f}MB',
+                            'gpu': gpu_str
+                        })
+                    else:
+                        pbar.set_postfix({
+                            'loss': f'{latest_loss:.4f}',
+                            'lr': f'{self.config.lr:.2e}',
+                            'mem': f'{mem_mb:.0f}MB',
                         'gpu': gpu_str
                     })
                 
@@ -523,7 +628,7 @@ def main(config_path: Optional[str] = None):
     logger = setup_logger(
         name="train",
         log_dir=str(log_dir),
-        level="INFO"
+        level="DEBUG"  # Changed from INFO to DEBUG to see debug messages
     )
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -572,6 +677,8 @@ def main(config_path: Optional[str] = None):
         num_classes=config.num_classes,
         frozen_backbone_stages=config.frozen_backbone_stages  # Use the frozen stages from config
     )
+    model.logger = logger  # Add logger to model for debug output
+    model.roi_head.logger = logger  # Add logger to ROI head for debug output
     
     # Load pretrained weights if specified
     if config.pretrained_backbone and config.pretrained_checkpoint_url:

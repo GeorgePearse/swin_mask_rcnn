@@ -16,9 +16,9 @@ def parse_args():
                         help='Path(s) to input images')
     parser.add_argument('--num-classes', type=int, default=69,
                         help='Number of classes')
-    parser.add_argument('--score-threshold', type=float, default=0.5,
+    parser.add_argument('--score-threshold', type=float, default=0.001,
                         help='Score threshold for predictions')
-    parser.add_argument('--nms-threshold', type=float, default=0.5,
+    parser.add_argument('--nms-threshold', type=float, default=0.3,
                         help='NMS threshold')
     parser.add_argument('--no-visualize', action='store_true',
                         help='Skip FiftyOne visualization')

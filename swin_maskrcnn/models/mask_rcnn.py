@@ -145,6 +145,11 @@ class SwinMaskRCNN(nn.Module):
                 {'nms_pre': 1000, 'nms_thr': 0.7, 'max_per_img': 1000}
             )
             rpn_losses = None
+            
+            # Debug: log number of proposals
+            if hasattr(self, 'logger') and self.logger:
+                total_proposals = sum(len(p) for p in proposals)
+                self.logger.debug(f"RPN generated {total_proposals} proposals for {len(proposals)} images")
         
         # ROI head forward
         if self.training and targets is not None:

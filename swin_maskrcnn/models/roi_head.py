@@ -42,7 +42,7 @@ class BBoxHead(nn.Module):
         # Initialize classification bias to favor background class
         # This helps stabilize initial training
         nn.init.constant_(self.fc_cls.bias, 0)
-        self.fc_cls.bias.data[0] = 2.0  # Favor background class
+        self.fc_cls.bias.data[0] = 0.5  # Small bias toward background (was 2.0)
         nn.init.constant_(self.fc_reg.bias, 0)
         
     def forward(self, roi_feats):
@@ -515,6 +515,12 @@ class StandardRoIHead(nn.Module):
         
         # Get predicted classes and scores
         scores, pred_labels = cls_probs.max(dim=1)
+        
+        # Debug: Print score statistics
+        if hasattr(self, 'logger') and self.logger:
+            self.logger.debug(f"Raw scores - min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
+            self.logger.debug(f"Predicted labels distribution: {torch.bincount(pred_labels).tolist()}")
+            self.logger.debug(f"Number of non-background predictions: {(pred_labels > 0).sum()}")
         
         # Track number of proposals per image for proper splitting
         proposal_splits = [len(p) for p in proposals]

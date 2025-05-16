@@ -99,7 +99,8 @@ class RPNHead(nn.Module):
         nn.init.constant_(self.rpn_conv.bias, 0)
         # Initialize cls bias to predict background with high probability
         # log(0.99 / 0.01) = -4.59 means initial prediction will be ~0.01 foreground
-        nn.init.constant_(self.rpn_cls.bias, -4.59)
+        # Reduce bias for better initial detection performance
+        nn.init.constant_(self.rpn_cls.bias, -2.0)  # Was -4.59, now less extreme
         nn.init.constant_(self.rpn_reg.bias, 0)
         
     def forward(self, features):

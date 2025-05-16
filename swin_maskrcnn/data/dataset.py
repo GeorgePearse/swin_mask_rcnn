@@ -55,6 +55,11 @@ class CocoDataset(Dataset):
         real_idx = self.valid_ids[idx]
         img, annotations = self.coco[real_idx]
         
+        # Get image ID and filename for tracking
+        img_id = self.coco.ids[real_idx]
+        img_info = self.coco.coco.loadImgs(img_id)[0]
+        img_filename = img_info.get('file_name', f'image_{img_id}')
+        
         # Convert PIL to numpy
         img = np.array(img)
         
@@ -173,6 +178,7 @@ class CocoDataset(Dataset):
             'labels': labels,
             'masks': masks,
             'image_id': torch.tensor([self.coco.ids[real_idx]]),
+            'image_filename': img_filename,
         }
         
         return img, target
