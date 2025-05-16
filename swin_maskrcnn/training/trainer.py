@@ -175,13 +175,15 @@ class MaskRCNNTrainer:
         Returns:
             Dict containing validation metrics
         """
+        print(f"\nStarting validation for epoch {epoch+1}...")
         self.model.eval()
         
         val_losses = []
+        detailed_losses = defaultdict(list)
         
-        pbar = tqdm(self.val_loader, desc=f"Epoch {epoch+1}/{self.num_epochs} [Val]")
+        pbar = tqdm(self.val_loader, desc=f"Epoch {epoch+1}/{self.num_epochs} [Validation]")
         
-        for images, targets in pbar:
+        for batch_idx, (images, targets) in enumerate(pbar):
             # Move to device
             images = [img.to(self.device) for img in images]
             targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
@@ -191,10 +193,27 @@ class MaskRCNNTrainer:
             total_loss = sum(loss_dict.values())
             
             val_losses.append(total_loss.item())
-            pbar.set_postfix({'loss': f'{total_loss.item():.4f}'})
+            
+            # Track individual loss components
+            for key, value in loss_dict.items():
+                detailed_losses[key].append(value.item())
+            
+            pbar.set_postfix({
+                'batch': f'{batch_idx+1}',
+                'loss': f'{total_loss.item():.4f}'
+            })
         
+        # Calculate averages
         avg_val_loss = np.mean(val_losses)
         self.val_history['loss'].append(avg_val_loss)
+        
+        # Print detailed loss breakdown
+        print(f"\nValidation results for epoch {epoch+1}:")
+        print(f"  Average loss: {avg_val_loss:.4f}")
+        print(f"  Loss breakdown:")
+        for key, values in detailed_losses.items():
+            avg_loss = np.mean(values)
+            print(f"    {key}: {avg_loss:.4f}")
         
         return {'loss': avg_val_loss}
     
@@ -260,7 +279,9 @@ class MaskRCNNTrainer:
             val_metrics = self.validate(epoch)
             
             # Print epoch summary
-            print(f"\nEpoch {epoch+1}/{self.num_epochs}")
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1}/{self.num_epochs} SUMMARY")
+            print(f"{'='*60}")
             print(f"Train Loss: {train_metrics['loss']:.4f}")
             print(f"Val Loss: {val_metrics['loss']:.4f}")
             print(f"Learning Rate: {self.scheduler.get_last_lr()[0]:.2e}")
@@ -269,6 +290,7 @@ class MaskRCNNTrainer:
             is_best = val_metrics['loss'] < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_metrics['loss']
+                print(f">>> NEW BEST VALIDATION LOSS! <<<")
             
             self.save_checkpoint(epoch, is_best)
             
