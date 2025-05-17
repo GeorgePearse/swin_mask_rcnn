@@ -26,6 +26,7 @@ from swin_maskrcnn.utils.collate import collate_fn
 from scripts.config import TrainingConfig
 from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
 from swin_maskrcnn.utils.logging import setup_logger
+from swin_maskrcnn.callbacks import ONNXExportCallback
 
 
 def get_gpu_memory_mb():
@@ -313,50 +314,9 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Log default metric to prevent ModelCheckpoint errors
         self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True)
     
-    def export_to_onnx(self, save_dir: Path):
-        """Export model to ONNX format."""
-        try:
-            onnx_filename = f"model_epoch{self.current_epoch:03d}_step{self.global_step}.onnx"
-            onnx_path = save_dir / onnx_filename
-            
-            # Create dummy input
-            dummy_input = torch.randn(1, 3, 800, 800).to(self.device)
-            
-            # Export the model
-            self.model.eval()
-            torch.onnx.export(
-                self.model.backbone,  # Export only backbone for simplicity (full model is complex)
-                dummy_input,
-                str(onnx_path),
-                export_params=True,
-                opset_version=11,
-                do_constant_folding=True,
-                input_names=['input'],
-                output_names=['output'],
-                dynamic_axes={'input': {0: 'batch_size'},
-                            'output': {0: 'batch_size'}}
-            )
-            
-            print(f"Exported model backbone to ONNX: {onnx_path}")
-            
-            # Also export the full model weights separately
-            weights_filename = f"weights_epoch{self.current_epoch:03d}_step{self.global_step}.pth"
-            weights_path = save_dir / weights_filename
-            torch.save(self.model.state_dict(), weights_path)
-            print(f"Saved model weights: {weights_path}")
-            
-        except Exception as e:
-            print(f"ONNX export failed: {e}")
     
     def on_validation_epoch_end(self):
         """Run COCO evaluation at the end of validation epoch."""
-        # Export model to ONNX before evaluation
-        # Get the run directory from trainer's checkpoint callback
-        checkpoint_callback = self.trainer.checkpoint_callback
-        if checkpoint_callback and hasattr(checkpoint_callback, 'dirpath'):
-            save_dir = Path(checkpoint_callback.dirpath)
-            self.export_to_onnx(save_dir)
-        
         # If validation hasn't run yet, log default metric
         if hasattr(self.config, 'validation_start_step') and self.global_step < self.config.validation_start_step:
             self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
@@ -560,7 +520,12 @@ def main(config_path: Optional[str] = None):
             save_top_k=3,
             save_last=True
         ),
-        LearningRateMonitor(logging_interval='step')
+        LearningRateMonitor(logging_interval='step'),
+        ONNXExportCallback(
+            export_dir=run_dir,
+            export_backbone_only=True,
+            save_weights=True
+        )
     ]
     
     # Create trainer with validation interval
