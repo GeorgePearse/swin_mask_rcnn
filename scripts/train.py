@@ -124,10 +124,6 @@ class MaskRCNNLightningModule(pl.LightningModule):
             'roi_bbox_loss': 1.0,
             'roi_mask_loss': 1.0,
         }
-        
-        # Set batch size properties for Lightning
-        self._train_batch_size = config.train_batch_size
-        self._val_batch_size = config.val_batch_size
     
     def forward(self, images, targets=None):
         return self.model(images, targets)
@@ -174,6 +170,11 @@ class MaskRCNNLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Lightning training step."""
         images, targets = batch
+        batch_size = len(images)
+        
+        # Debug batch size issue
+        if batch_idx < 5:  # Log first few batches
+            print(f"Batch {batch_idx}: actual batch size = {batch_size}, expected = {self.config.train_batch_size}")
         
         try:
             # Move to device
@@ -206,9 +207,9 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 avg_predictions = total_predictions / len(predictions) if predictions else 0
                 
                 # Log prediction statistics
-                self.log('train/total_predictions', total_predictions, on_step=True, on_epoch=True, prog_bar=True)
-                self.log('train/avg_predictions_per_image', avg_predictions, on_step=True, on_epoch=True)
-                self.log('train/images_with_predictions', sum(1 for c in pred_counts if c > 0), on_step=True, on_epoch=True)
+                self.log('train/total_predictions', total_predictions, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+                self.log('train/avg_predictions_per_image', avg_predictions, on_step=True, on_epoch=True, batch_size=batch_size)
+                self.log('train/images_with_predictions', sum(1 for c in pred_counts if c > 0), on_step=True, on_epoch=True, batch_size=batch_size)
                 
                 # Log number of annotations per image for comparison
                 annotation_counts = []
@@ -221,9 +222,9 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 total_annotations = sum(annotation_counts)
                 avg_annotations = total_annotations / len(annotation_counts) if annotation_counts else 0
                 
-                self.log('train/total_annotations', total_annotations, on_step=True, on_epoch=True, prog_bar=True)
-                self.log('train/avg_annotations_per_image', avg_annotations, on_step=True, on_epoch=True)
-                self.log('train/images_with_annotations', sum(1 for c in annotation_counts if c > 0), on_step=True, on_epoch=True)
+                self.log('train/total_annotations', total_annotations, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+                self.log('train/avg_annotations_per_image', avg_annotations, on_step=True, on_epoch=True, batch_size=batch_size)
+                self.log('train/images_with_annotations', sum(1 for c in annotation_counts if c > 0), on_step=True, on_epoch=True, batch_size=batch_size)
             
             # Back to training mode for loss calculation
             self.model.train()
@@ -240,19 +241,19 @@ class MaskRCNNLightningModule(pl.LightningModule):
             total_loss = sum(weighted_losses.values())
             
             # Log losses to TensorBoard
-            self.log('train/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('train/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
             # Log both raw and weighted losses for better debugging
             for k, v in loss_dict.items():
-                self.log(f'train/{k}', v, on_step=True, on_epoch=True)
+                self.log(f'train/{k}', v, on_step=True, on_epoch=True, batch_size=batch_size)
                 weight = self.loss_weights.get(k, 1.0)
                 if weight != 1.0:
-                    self.log(f'train/{k}_weighted', v * weight, on_step=True, on_epoch=True)
+                    self.log(f'train/{k}_weighted', v * weight, on_step=True, on_epoch=True, batch_size=batch_size)
             
             # Log memory usage
             memory_mb = get_gpu_memory_mb()
             gpu_util = get_gpu_utilization()
-            self.log('train/memory_mb', memory_mb, on_step=True, on_epoch=False)
-            self.log('train/gpu_utilization', gpu_util, on_step=True, on_epoch=False)
+            self.log('train/memory_mb', memory_mb, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log('train/gpu_utilization', gpu_util, on_step=True, on_epoch=False, batch_size=batch_size)
             
             return total_loss
             
@@ -288,6 +289,9 @@ class MaskRCNNLightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Lightning validation step."""
+        images, targets = batch
+        batch_size = len(images)
+        
         # Skip validation if we haven't reached the minimum step count
         skip_validation = False
         if hasattr(self.config, 'validation_start_step'):
@@ -297,8 +301,6 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # If we're skipping validation, return early with minimal computation
         if skip_validation:
             return {'predictions': 0}
-        
-        images, targets = batch
         
         # Move to device
         images = [img.to(self.device) for img in images]
@@ -365,7 +367,7 @@ class MaskRCNNLightningModule(pl.LightningModule):
         
         # Log prediction statistics by threshold
         for threshold, count in threshold_counts.items():
-            self.log(f'val/predictions_above_{threshold}', count, on_step=True, on_epoch=True)
+            self.log(f'val/predictions_above_{threshold}', count, on_step=True, on_epoch=True, batch_size=batch_size)
         
         # Return a dummy value for Lightning
         return {'predictions': len(batch_predictions)}
@@ -373,22 +375,22 @@ class MaskRCNNLightningModule(pl.LightningModule):
     @property
     def train_batch_size(self) -> int:
         """Return train batch size for Lightning."""
-        return self._train_batch_size
+        return self.config.train_batch_size
     
     @property
     def val_batch_size(self) -> int:
         """Return validation batch size for Lightning."""
-        return self._val_batch_size
+        return self.config.val_batch_size
     
     def on_sanity_check_start(self):
         """Called at the start of the sanity check."""
         # Log default metric to prevent ModelCheckpoint errors during sanity check
-        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True)
+        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, batch_size=self.config.val_batch_size)
         
     def on_sanity_check_end(self):
         """Called at the end of the sanity check."""
         # Log default metric to prevent ModelCheckpoint errors
-        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True)
+        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, batch_size=self.config.val_batch_size)
     
     
     def on_validation_epoch_end(self):
@@ -549,7 +551,8 @@ def main(config_path: Optional[str] = None):
         shuffle=True,
         num_workers=config.num_workers,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True  # Ensure consistent batch sizes
     )
     
     val_loader = DataLoader(
@@ -558,7 +561,8 @@ def main(config_path: Optional[str] = None):
         shuffle=False,
         num_workers=config.num_workers,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=False  # Keep all validation samples
     )
     
     # Create COCO object for validation
