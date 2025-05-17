@@ -36,10 +36,10 @@ This document summarizes all the changes applied to fix the issue where detectio
 
 ### Changes Made:
 - Added proper normalization for all three losses
-- Classification: Uses avg_factor (total samples)
+- Classification: Now uses explicit `reduction='mean'` for proper averaging
 - Bbox: Normalized by number of positive samples
 - Mask: Normalized by number of positive samples
-- Changed reduction from 'mean' to 'sum' with manual normalization
+- Changed reduction from default to explicit specification
 
 ## 4. Loss Weight Configuration
 
@@ -94,14 +94,16 @@ def loss(self, ...):
 
 For training with severe class imbalance:
 ```yaml
-rpn_cls_pos_weight: 2.0  # Upweight positive anchors
+rpn_cls_pos_weight: 5.0  # Upweight positive anchors (increased from 1.0)
 rpn_loss_cls_weight: 1.0
 rpn_loss_bbox_weight: 1.0
-roi_cls_pos_weight: 2.0  # Upweight foreground classes
+roi_cls_pos_weight: 3.0  # Upweight foreground classes (increased from 1.0)
 roi_loss_cls_weight: 1.0
 roi_loss_bbox_weight: 1.0
 roi_loss_mask_weight: 1.0
 ```
+
+**Note**: These values were updated from the initial recommendation of 2.0 after observing detections dropping to 0 during training.
 
 ## Expected Benefits
 
@@ -120,10 +122,24 @@ Watch for:
 - Balanced contribution from different loss components
 - Validation mAP improving over time
 
+## Recent Updates (January 2025)
+
+### Issue Observed
+Detections were dropping to 0 after initial training steps when using positive weights of 1.0.
+
+### Solution Applied
+1. Increased `rpn_cls_pos_weight` from 1.0 to 5.0
+2. Increased `roi_cls_pos_weight` from 1.0 to 3.0
+3. Added explicit `reduction='mean'` to ROI classification loss
+4. Updated both `training_config.py` and `config.yaml` with new values
+
 ## Next Steps
 
-1. Start training with default weights (all 1.0)
-2. Monitor loss behavior in first few epochs
-3. If detections still drop, increase positive weights to 2.0-3.0
-4. Fine-tune based on validation performance
-5. Consider adjusting individual loss component weights
+1. Start training with updated weights (RPN: 5.0, ROI: 3.0)
+2. Monitor loss behavior carefully in first few epochs
+3. Watch for detections above various thresholds (0.1, 0.3, 0.5)
+4. If detections still drop, consider:
+   - Further increasing positive weights
+   - Implementing focal loss
+   - Adding online hard negative mining
+5. Fine-tune based on validation mAP performance

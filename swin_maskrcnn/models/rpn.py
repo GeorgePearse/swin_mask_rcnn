@@ -5,6 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import batched_nms, box_convert, box_iou
+from swin_maskrcnn.utils.logging import get_logger
+
+logger = get_logger()
 
 
 class AnchorGenerator:
@@ -354,9 +357,9 @@ class RPNHead(nn.Module):
             img_cls_scores = torch.sigmoid(img_cls_scores)
             
             # Debug logging
-            print(f"[RPN] Image {img_idx}: Total anchors: {len(img_anchors)}")
-            print(f"[RPN] Score stats - min: {img_cls_scores.min():.4f}, max: {img_cls_scores.max():.4f}, mean: {img_cls_scores.mean():.4f}")
-            print(f"[RPN] Number of high-scoring anchors (>0.5): {(img_cls_scores > 0.5).sum()}")
+            logger.debug(f"[RPN] Image {img_idx}: Total anchors: {len(img_anchors)}")
+            logger.debug(f"[RPN] Score stats - min: {img_cls_scores.min():.4f}, max: {img_cls_scores.max():.4f}, mean: {img_cls_scores.mean():.4f}")
+            logger.debug(f"[RPN] Number of high-scoring anchors (>0.5): {(img_cls_scores > 0.5).sum()}")
             
             # Decode bboxes
             decoded_bboxes = self.decode_bbox(img_anchors, img_bbox_preds)
@@ -386,6 +389,6 @@ class RPNHead(nn.Module):
             keep = keep[:max_per_img]
             
             proposals.append(decoded_bboxes[keep])
-            print(f"[RPN] Final proposals for image {img_idx}: {len(keep)}")
+            logger.debug(f"[RPN] Final proposals for image {img_idx}: {len(keep)}")
         
         return proposals

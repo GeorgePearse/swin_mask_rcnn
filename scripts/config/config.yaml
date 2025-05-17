@@ -7,10 +7,10 @@ img_root: /home/georgepearse/data/images
 
 # Model parameters
 num_classes: 69
-rpn_cls_pos_weight: 1.0  # Increase to emphasize positive samples
+rpn_cls_pos_weight: 5.0  # Increase to emphasize positive samples
 rpn_loss_cls_weight: 1.0
 rpn_loss_bbox_weight: 1.0
-roi_cls_pos_weight: 1.0  # Increase for foreground emphasis
+roi_cls_pos_weight: 3.0  # Increase for foreground emphasis
 roi_loss_cls_weight: 1.0
 roi_loss_bbox_weight: 1.0
 roi_loss_mask_weight: 1.0

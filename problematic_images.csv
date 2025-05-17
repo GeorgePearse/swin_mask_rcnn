@@ -1,13 +1,1 @@
 epoch,batch_idx,image_filename,image_id,error_type,error_message
-0,129,120d-2025-01-14T22:59:01.968036528Z-191.jpg,300308,AssertionError,Shape mismatch: predictions 4 vs targets 516
-0,129,120d-2025-01-13T22:37:04.867765883Z-191.jpg,302305,AssertionError,Shape mismatch: predictions 4 vs targets 516
-0,157,120d-2025-04-02T21:12:52.677998099Z-191.jpg,310297,AssertionError,Shape mismatch: predictions 2 vs targets 514
-0,157,120d-2025-04-01T17:29:18.559274109Z-191.jpg,311363,AssertionError,Shape mismatch: predictions 2 vs targets 514
-0,218,120d-2025-04-01T20:06:35.239014412Z-191.jpg,308327,AssertionError,Shape mismatch: predictions 2 vs targets 514
-0,218,120d-2025-01-15T16:15:22.901726691Z-191.jpg,302107,AssertionError,Shape mismatch: predictions 2 vs targets 514
-0,239,120d-2025-03-03T22:59:42.045260477Z-191.jpg,309689,AssertionError,Shape mismatch: predictions 5 vs targets 517
-0,239,120d-2025-01-14T21:49:52.686069604Z-191.jpg,300268,AssertionError,Shape mismatch: predictions 5 vs targets 517
-1,429,120d-2025-02-12T20:14:50.828159391Z-191.jpg,305545,AssertionError,Shape mismatch: predictions 2 vs targets 514
-1,429,2024-12-12T22:46:46.546342874Z-191.jpg,296083,AssertionError,Shape mismatch: predictions 2 vs targets 514
-1,532,120d-2025-02-03T19:47:28.37800472Z-191.jpg,309519,AssertionError,Shape mismatch: predictions 53 vs targets 565
-1,532,120d-2025-04-03T22:49:08.239541741Z-191.jpg,309886,AssertionError,Shape mismatch: predictions 53 vs targets 565

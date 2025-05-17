@@ -5,6 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import RoIAlign, box_iou
+from swin_maskrcnn.utils.logging import get_logger
+
+logger = get_logger()
 
 
 class BBoxHead(nn.Module):
@@ -40,13 +43,10 @@ class BBoxHead(nn.Module):
         nn.init.constant_(self.shared_fc1.bias, 0)
         nn.init.constant_(self.shared_fc2.bias, 0)
         # Initialize classification biases to encourage more detections
-        # Use focal loss-style initialization for better training
-        pi = 0.01  # probability of foreground
-        bias_bg = -torch.log(torch.tensor((1 - pi) / pi)).item()
-        bias_fg = -torch.log(torch.tensor(pi / (1 - pi))).item()
-        
-        nn.init.constant_(self.fc_cls.bias, bias_fg)  # Foreground bias
-        self.fc_cls.bias.data[0] = bias_bg  # Background bias
+        # Use a more balanced initialization to avoid extreme background confidence
+        nn.init.constant_(self.fc_cls.bias, 0)  # Start neutral
+        self.fc_cls.bias.data[0] = 0.0  # Background bias
+        self.fc_cls.bias.data[1:] = -1.0  # Slight foreground bias
         nn.init.constant_(self.fc_reg.bias, 0)
         
     def forward(self, roi_feats):
@@ -54,9 +54,11 @@ class BBoxHead(nn.Module):
         # Flatten
         x = roi_feats.flatten(1)
         
-        # Shared layers
+        # Shared layers with dropout for better generalization
         x = F.relu(self.shared_fc1(x))
+        x = F.dropout(x, p=0.5, training=self.training)
         x = F.relu(self.shared_fc2(x))
+        x = F.dropout(x, p=0.5, training=self.training)
         
         # Classification and regression
         cls_score = self.fc_cls(x)
@@ -469,12 +471,14 @@ class StandardRoIHead(nn.Module):
         
         # Classification loss with avg_factor
         if self.cls_pos_weight > 1.0:
-            # Apply positive weight to foreground classes
-            weight = torch.ones_like(all_labels, dtype=torch.float32)
-            weight[all_labels > 0] = self.cls_pos_weight
-            cls_loss = F.cross_entropy(cls_scores, all_labels, weight=weight)
+            # Create weight tensor for each class (shape: [num_classes + 1])
+            # Apply positive weight to all foreground classes
+            num_total_classes = cls_scores.size(1)  # num_classes + 1
+            weight = torch.ones(num_total_classes, dtype=torch.float32, device=cls_scores.device)
+            weight[1:] = self.cls_pos_weight  # Apply to all foreground classes
+            cls_loss = F.cross_entropy(cls_scores, all_labels, weight=weight, reduction='mean')
         else:
-            cls_loss = F.cross_entropy(cls_scores, all_labels)
+            cls_loss = F.cross_entropy(cls_scores, all_labels, reduction='mean')
             
         losses['cls_loss'] = cls_loss * self.loss_cls_weight
         
@@ -546,10 +550,10 @@ class StandardRoIHead(nn.Module):
         scores, pred_labels = cls_probs.max(dim=1)
         
         # Enhanced debugging
-        print(f"[ROI] Score stats - min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
-        print(f"[ROI] Background probs - min: {cls_probs[:, 0].min():.4f}, max: {cls_probs[:, 0].max():.4f}, mean: {cls_probs[:, 0].mean():.4f}")
-        print(f"[ROI] Predicted labels distribution: {torch.bincount(pred_labels).tolist()}")
-        print(f"[ROI] Number of non-background predictions: {(pred_labels > 0).sum()}")
+        logger.debug(f"[ROI] Score stats - min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
+        logger.debug(f"[ROI] Background probs - min: {cls_probs[:, 0].min():.4f}, max: {cls_probs[:, 0].max():.4f}, mean: {cls_probs[:, 0].mean():.4f}")
+        logger.debug(f"[ROI] Predicted labels distribution: {torch.bincount(pred_labels).tolist()}")
+        logger.debug(f"[ROI] Number of non-background predictions: {(pred_labels > 0).sum()}")
         
         # Track number of proposals per image for proper splitting
         proposal_splits = [len(p) for p in proposals]

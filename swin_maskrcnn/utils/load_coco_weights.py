@@ -152,17 +152,28 @@ def load_coco_weights(model: nn.Module, num_classes: int = 70, strict: bool = Fa
             coco_cls_bias = converted_state_dict['roi_head.bbox_head.fc_cls.bias']
             
             # Initialize new classifier weights (num_classes + 1 for background)
-            new_cls_weight = torch.randn(num_classes + 1, coco_cls_weight.shape[1]) * 0.001
+            # Use proper initialization - not too small!
+            new_cls_weight = torch.randn(num_classes + 1, coco_cls_weight.shape[1])
+            nn.init.xavier_uniform_(new_cls_weight)  # Proper initialization
+            
             new_cls_bias = torch.zeros(num_classes + 1)
             
-            # Copy COCO weights for background class
+            # Copy COCO weights for background class only
             new_cls_weight[0] = coco_cls_weight[0]
-            new_cls_bias[0] = coco_cls_bias[0]
             
-            # For remaining classes, use random initialization but with similar scale
-            if num_classes > 0:
-                nn.init.normal_(new_cls_weight[1:], mean=0, std=0.001)
-                nn.init.constant_(new_cls_bias[1:], 0)
+            # For foreground classes, copy a few COCO classes as templates
+            # This helps preserve the learned features
+            for i in range(1, min(num_classes + 1, coco_cls_weight.shape[0])):
+                new_cls_weight[i] = coco_cls_weight[i]
+            
+            # Set biases to encourage detection
+            new_cls_bias[0] = 0.0  # Neutral background
+            new_cls_bias[1:] = -1.0  # Negative bias for foreground to encourage detection
+            
+            # Scale weights if they're too small
+            weight_norm = new_cls_weight[1:].norm(dim=1).mean()
+            if weight_norm < 1.0:
+                new_cls_weight[1:] *= 2.0 / weight_norm  # Scale to reasonable magnitude
             
             converted_state_dict['roi_head.bbox_head.fc_cls.weight'] = new_cls_weight
             converted_state_dict['roi_head.bbox_head.fc_cls.bias'] = new_cls_bias
@@ -173,12 +184,15 @@ def load_coco_weights(model: nn.Module, num_classes: int = 70, strict: bool = Fa
             coco_reg_bias = converted_state_dict['roi_head.bbox_head.fc_reg.bias']
             
             # Initialize new regression weights (num_classes * 4, without background)
-            new_reg_weight = torch.randn(num_classes * 4, coco_reg_weight.shape[1]) * 0.001
+            new_reg_weight = torch.randn(num_classes * 4, coco_reg_weight.shape[1])
+            nn.init.xavier_uniform_(new_reg_weight)  # Proper initialization
             new_reg_bias = torch.zeros(num_classes * 4)
             
-            # Copy first set of regression weights 
-            new_reg_weight[:4] = coco_reg_weight[:4]
-            new_reg_bias[:4] = coco_reg_bias[:4]
+            # Copy as many COCO regression weights as possible
+            copy_classes = min(num_classes, coco_reg_weight.shape[0] // 4)
+            for i in range(copy_classes):
+                new_reg_weight[i*4:(i+1)*4] = coco_reg_weight[i*4:(i+1)*4]
+                new_reg_bias[i*4:(i+1)*4] = coco_reg_bias[i*4:(i+1)*4]
             
             converted_state_dict['roi_head.bbox_head.fc_reg.weight'] = new_reg_weight
             converted_state_dict['roi_head.bbox_head.fc_reg.bias'] = new_reg_bias
@@ -190,5 +204,19 @@ def load_coco_weights(model: nn.Module, num_classes: int = 70, strict: bool = Fa
     if hasattr(model.roi_head, 'mask_head'):
         nn.init.normal_(model.roi_head.mask_head.conv_logits.weight, mean=0, std=0.001)
         nn.init.constant_(model.roi_head.mask_head.conv_logits.bias, 0)
+    
+    # Post-loading check: ensure weights are reasonable magnitude
+    if hasattr(model.roi_head, 'bbox_head') and hasattr(model.roi_head.bbox_head, 'fc_cls'):
+        fc_cls = model.roi_head.bbox_head.fc_cls
+        with torch.no_grad():
+            weight_norm = fc_cls.weight[1:].norm(dim=1).mean()
+            print(f"Classifier weight norm: {weight_norm:.4f}")
+            print(f"Biases: background={fc_cls.bias[0].item():.4f}, foreground mean={fc_cls.bias[1:].mean().item():.4f}")
+            
+            # Only scale if weights are too small
+            if weight_norm < 3.0:
+                scale_factor = 5.0 / weight_norm
+                fc_cls.weight.data[1:] *= scale_factor
+                print(f"Scaled foreground weights by {scale_factor:.2f}x to achieve norm ~5.0")
     
     return missing_keys, unexpected_keys

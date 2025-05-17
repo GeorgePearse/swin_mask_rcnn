@@ -25,10 +25,10 @@ class TrainingConfig(BaseModel):
     num_classes: int = Field(default=70, description="Number of classes including background (69 objects + 1 background)")
     
     # Loss parameters
-    rpn_cls_pos_weight: float = Field(default=1.0, description="RPN classification positive weight")
+    rpn_cls_pos_weight: float = Field(default=5.0, description="RPN classification positive weight")
     rpn_loss_cls_weight: float = Field(default=1.0, description="RPN classification loss weight")
     rpn_loss_bbox_weight: float = Field(default=1.0, description="RPN bbox regression loss weight")
-    roi_cls_pos_weight: float = Field(default=1.0, description="ROI classification positive weight")
+    roi_cls_pos_weight: float = Field(default=3.0, description="ROI classification positive weight")
     roi_loss_cls_weight: float = Field(default=1.0, description="ROI classification loss weight")
     roi_loss_bbox_weight: float = Field(default=1.0, description="ROI bbox regression loss weight")
     roi_loss_mask_weight: float = Field(default=1.0, description="ROI mask loss weight")

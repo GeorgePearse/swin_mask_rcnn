@@ -9,6 +9,9 @@ from .swin import SwinTransformer
 from .fpn import FPN
 from .rpn import RPNHead
 from .roi_head import StandardRoIHead
+from swin_maskrcnn.utils.logging import get_logger
+
+logger = get_logger()
 
 
 class SwinMaskRCNN(nn.Module):
@@ -162,12 +165,11 @@ class SwinMaskRCNN(nn.Module):
             
             # Debug: log number of proposals
             if proposals is not None and len(proposals) > 0:
-                print(f"[DEBUG] RPN proposals for batch: {[len(p) for p in proposals]}")
-            else:
-                print(f"[DEBUG] No RPN proposals generated")
-            if hasattr(self, 'logger') and self.logger:
+                logger.debug(f"[DEBUG] RPN proposals for batch: {[len(p) for p in proposals]}")
                 total_proposals = sum(len(p) for p in proposals)
-                self.logger.debug(f"RPN generated {total_proposals} proposals for {len(proposals)} images")
+                logger.debug(f"RPN generated {total_proposals} proposals for {len(proposals)} images")
+            else:
+                logger.debug(f"[DEBUG] No RPN proposals generated")
         
         # ROI head forward
         if self.training and targets is not None:
@@ -184,7 +186,7 @@ class SwinMaskRCNN(nn.Module):
             # Debug: log detections with more detail
             if detections is not None and len(detections) > 0:
                 total_detections = sum(len(d.get('boxes', [])) for d in detections)
-                print(f"[DEBUG] Total detections: {total_detections}, per image: {[len(d.get('boxes', [])) for d in detections]}")
+                logger.debug(f"[DEBUG] Total detections: {total_detections}, per image: {[len(d.get('boxes', [])) for d in detections]}")
                 
                 # Log score distribution
                 all_scores = []
@@ -195,16 +197,16 @@ class SwinMaskRCNN(nn.Module):
                 if all_scores:
                     import numpy as np
                     scores_np = np.array(all_scores)
-                    print(f"[DEBUG] Score statistics - count: {len(scores_np)}, "
+                    logger.debug(f"[DEBUG] Score statistics - count: {len(scores_np)}, "
                           f"min: {scores_np.min():.4f}, max: {scores_np.max():.4f}, "
                           f"mean: {scores_np.mean():.4f}, std: {scores_np.std():.4f}")
                     
                     # Score histogram
                     score_bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
                     hist, _ = np.histogram(scores_np, bins=score_bins)
-                    print(f"[DEBUG] Score histogram (0-0.1, 0.1-0.2, ...): {hist.tolist()}")
+                    logger.debug(f"[DEBUG] Score histogram (0-0.1, 0.1-0.2, ...): {hist.tolist()}")
             else:
-                print(f"[DEBUG] No detections from ROI head")
+                logger.debug(f"[DEBUG] No detections from ROI head")
             return detections
     
     @torch.no_grad()
