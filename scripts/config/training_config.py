@@ -93,6 +93,10 @@ class TrainingConfig(BaseModel):
         default="https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth",
         description="URL for pretrained checkpoint (mmdetection format)"
     )
+    checkpoint_path: Optional[Path] = Field(
+        default=None,
+        description="Path to local checkpoint to load (overrides pretrained_checkpoint_url)"
+    )
     frozen_backbone_stages: int = Field(
         default=2,
         ge=-1,

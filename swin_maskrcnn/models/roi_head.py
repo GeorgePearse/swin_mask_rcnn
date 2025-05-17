@@ -42,11 +42,12 @@ class BBoxHead(nn.Module):
         nn.init.xavier_uniform_(self.fc_reg.weight)
         nn.init.constant_(self.shared_fc1.bias, 0)
         nn.init.constant_(self.shared_fc2.bias, 0)
-        # Initialize classification biases to encourage more detections
-        # Use a more balanced initialization to avoid extreme background confidence
+        # Initialize classification biases for better detection
+        # Set background bias negative to reduce background predictions
+        # Set foreground biases to slightly positive to encourage object predictions
         nn.init.constant_(self.fc_cls.bias, 0)  # Start neutral
-        self.fc_cls.bias.data[0] = 0.0  # Background bias
-        self.fc_cls.bias.data[1:] = -1.0  # Slight foreground bias
+        self.fc_cls.bias.data[0] = -2.0  # Background bias negative to reduce false negatives
+        self.fc_cls.bias.data[1:] = 0.01  # Slightly positive foreground bias to encourage detections
         nn.init.constant_(self.fc_reg.bias, 0)
         
     def forward(self, roi_feats):

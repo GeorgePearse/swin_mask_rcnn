@@ -1,0 +1,49 @@
+# Training config that preserves fixed biases
+img_root: /home/georgepearse/data/images
+train_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json
+val_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json
+
+# Model
+num_classes: 69
+backbone_type: swin_s
+
+# Pretrained weights
+pretrained_backbone: true
+checkpoint_path: /home/georgepearse/swin_maskrcnn/checkpoints/coco_initialized_corrected_biases_v2.pth
+
+# Training
+num_epochs: 10  
+train_batch_size: 1  # Reduced to avoid OOM
+val_batch_size: 1  # Reduced to avoid OOM
+lr: 0.0001  # Increased for faster convergence
+optimizer: adamw
+momentum: 0.9
+weight_decay: 0.0001
+use_scheduler: true
+clip_grad_norm: 10.0
+use_amp: false
+
+# Loss weights - adjusted for better detection
+rpn_cls_pos_weight: 1.0
+rpn_loss_cls_weight: 1.0
+rpn_loss_bbox_weight: 1.0
+roi_cls_pos_weight: 0.5  # Reduced to not penalize false positives too much
+roi_loss_cls_weight: 1.0
+roi_loss_bbox_weight: 1.0
+roi_loss_mask_weight: 1.0
+
+# Logging
+checkpoint_dir: /home/georgepearse/swin_maskrcnn/checkpoints_fixed_biases_v2
+log_interval: 20
+steps_per_validation: 50  # Less frequent but still regular validation
+
+# Dataset
+num_workers: 4
+
+# Validation
+validation_start_step: 0  # Start validation immediately
+max_val_images: 50  # Reduced for faster validation
+
+# ONNX Export
+onnx_export_path: ""
+onnx_input_shape: [1, 3, 512, 512]

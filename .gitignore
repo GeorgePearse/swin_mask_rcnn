@@ -75,17 +75,40 @@ dmypy.json
 
 # Model checkpoints
 checkpoints/
+checkpoints_fixed_biases/
+checkpoints_fixed_biases_v2/
 test_checkpoints/
+test_norm_checkpoints/
 *.pth
 *.pt
+*.ckpt
+*.onnx
 
 # Logs
 *.log
 logs/
+demo_logs/
+lightning_logs/
+training_log*.txt
+*.tfevents.*
+tensorboard/
+debug_logs/
+
+# Prediction outputs
+predictions/
+*.json
 
 # Data
 data/
 !swin_maskrcnn/data/
+
+# CSV files
+*.csv
+
+# Test outputs
+test_checkpoints/
+test_norm_checkpoints/
+test_norm_config.yaml
 
 # Mac
 .DS_Store

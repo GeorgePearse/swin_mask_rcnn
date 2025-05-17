@@ -91,15 +91,35 @@ class MaskRCNNLightningModule(pl.LightningModule):
         
         # Load pretrained weights if specified
         if config.pretrained_backbone:
-            # Always load COCO pretrained weights with proper initialization
-            print("Loading COCO pretrained weights...")
-            missing_keys, unexpected_keys = load_coco_weights(self.model, num_classes=config.num_classes)
-            print(f"Missing keys: {len(missing_keys)}")
-            print(f"Unexpected keys: {len(unexpected_keys)}")
+            # Check if we have a specific checkpoint to load
+            if hasattr(config, 'checkpoint_path') and config.checkpoint_path:
+                print(f"Loading checkpoint from {config.checkpoint_path}")
+                checkpoint = torch.load(config.checkpoint_path, map_location='cpu', weights_only=False)
+                
+                # Handle different checkpoint formats
+                if isinstance(checkpoint, dict):
+                    if 'model_state_dict' in checkpoint:
+                        state_dict = checkpoint['model_state_dict']
+                    elif 'state_dict' in checkpoint:
+                        state_dict = checkpoint['state_dict']
+                    else:
+                        state_dict = checkpoint
+                else:
+                    state_dict = checkpoint
+                
+                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                print(f"Missing keys: {len(missing_keys)}")
+                print(f"Unexpected keys: {len(unexpected_keys)}")
+            else:
+                # Load COCO pretrained weights with proper initialization
+                print("Loading COCO pretrained weights...")
+                missing_keys, unexpected_keys = load_coco_weights(self.model, num_classes=config.num_classes)
+                print(f"Missing keys: {len(missing_keys)}")
+                print(f"Unexpected keys: {len(unexpected_keys)}")
             
             # Log some diagnostic info about the model
-            if hasattr(self.model.roi_head, 'fc_cls'):
-                cls_bias = self.model.roi_head.fc_cls.bias.detach().cpu().numpy()
+            if hasattr(self.model.roi_head.bbox_head, 'fc_cls'):
+                cls_bias = self.model.roi_head.bbox_head.fc_cls.bias.detach().cpu().numpy()
                 print(f"Background bias after loading: {cls_bias[0]:.4f}")
                 print(f"Object bias mean: {cls_bias[1:].mean():.4f}")
                 print(f"Object bias range: [{cls_bias[1:].min():.4f}, {cls_bias[1:].max():.4f}]")
@@ -340,12 +360,31 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 output['scores'].cpu().numpy(),
                 output['masks'].cpu().numpy()
             )):
-                # Use a very low threshold for debugging
-                if score < 0.001:  # Changed from 0.05 to 0.001 for debugging
-                    continue
+                # Comment out threshold for debugging
+                # if score < 0.001:  # Using very low threshold
+                #     continue
                 
                 # Convert mask to binary format and then to RLE
-                mask_binary = (mask[0] > 0.5).astype(np.uint8)
+                # mask already should be shape [H, W]
+                if mask.ndim == 3:
+                    mask_binary = (mask[0] > 0.5).astype(np.uint8)
+                else:
+                    mask_binary = (mask > 0.5).astype(np.uint8)
+                
+                # For untrained models, masks might be all zeros - check this
+                if mask_binary.sum() == 0:
+                    # Create a small box mask based on the bounding box
+                    if mask_binary.ndim == 2:
+                        h, w = mask_binary.shape
+                    else:
+                        # Should not happen, but handle edge case
+                        h, w = mask_binary.shape[-2:]
+                    x1n, y1n, x2n, y2n = box.astype(int)
+                    x1n = max(0, min(x1n, w-1))
+                    y1n = max(0, min(y1n, h-1))
+                    x2n = max(0, min(x2n, w))
+                    y2n = max(0, min(y2n, h))
+                    mask_binary[y1n:y2n, x1n:x2n] = 1
                 
                 # Convert to RLE using COCO's mask utilities
                 rle = maskUtils.encode(np.asfortranarray(mask_binary))
