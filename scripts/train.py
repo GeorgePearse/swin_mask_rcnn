@@ -104,6 +104,10 @@ class MaskRCNNLightningModule(pl.LightningModule):
             'roi_bbox_loss': 1.0,
             'roi_mask_loss': 1.0,
         }
+        
+        # Set batch size properties for Lightning
+        self._train_batch_size = config.train_batch_size
+        self._val_batch_size = config.val_batch_size
     
     def forward(self, images, targets=None):
         return self.model(images, targets)
@@ -220,6 +224,16 @@ class MaskRCNNLightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Lightning validation step."""
+        # Skip validation if we haven't reached the minimum step count
+        skip_validation = False
+        if hasattr(self.config, 'validation_start_step'):
+            if self.global_step < self.config.validation_start_step:
+                skip_validation = True
+        
+        # If we're skipping validation, return early with minimal computation
+        if skip_validation:
+            return {'predictions': 0}
+        
         images, targets = batch
         
         # Move to device
@@ -279,10 +293,80 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Return a dummy value for Lightning
         return {'predictions': len(batch_predictions)}
     
+    @property
+    def train_batch_size(self) -> int:
+        """Return train batch size for Lightning."""
+        return self._train_batch_size
+    
+    @property
+    def val_batch_size(self) -> int:
+        """Return validation batch size for Lightning."""
+        return self._val_batch_size
+    
+    def on_sanity_check_start(self):
+        """Called at the start of the sanity check."""
+        # Log default metric to prevent ModelCheckpoint errors during sanity check
+        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True)
+        
+    def on_sanity_check_end(self):
+        """Called at the end of the sanity check."""
+        # Log default metric to prevent ModelCheckpoint errors
+        self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True)
+    
+    def export_to_onnx(self, save_dir: Path):
+        """Export model to ONNX format."""
+        try:
+            onnx_filename = f"model_epoch{self.current_epoch:03d}_step{self.global_step}.onnx"
+            onnx_path = save_dir / onnx_filename
+            
+            # Create dummy input
+            dummy_input = torch.randn(1, 3, 800, 800).to(self.device)
+            
+            # Export the model
+            self.model.eval()
+            torch.onnx.export(
+                self.model.backbone,  # Export only backbone for simplicity (full model is complex)
+                dummy_input,
+                str(onnx_path),
+                export_params=True,
+                opset_version=11,
+                do_constant_folding=True,
+                input_names=['input'],
+                output_names=['output'],
+                dynamic_axes={'input': {0: 'batch_size'},
+                            'output': {0: 'batch_size'}}
+            )
+            
+            print(f"Exported model backbone to ONNX: {onnx_path}")
+            
+            # Also export the full model weights separately
+            weights_filename = f"weights_epoch{self.current_epoch:03d}_step{self.global_step}.pth"
+            weights_path = save_dir / weights_filename
+            torch.save(self.model.state_dict(), weights_path)
+            print(f"Saved model weights: {weights_path}")
+            
+        except Exception as e:
+            print(f"ONNX export failed: {e}")
+    
     def on_validation_epoch_end(self):
         """Run COCO evaluation at the end of validation epoch."""
+        # Export model to ONNX before evaluation
+        # Get the run directory from trainer's checkpoint callback
+        checkpoint_callback = self.trainer.checkpoint_callback
+        if checkpoint_callback and hasattr(checkpoint_callback, 'dirpath'):
+            save_dir = Path(checkpoint_callback.dirpath)
+            self.export_to_onnx(save_dir)
+        
+        # If validation hasn't run yet, log default metric
+        if hasattr(self.config, 'validation_start_step') and self.global_step < self.config.validation_start_step:
+            self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
+            self.log('val/mAP50', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
+            return
+            
         if not self.validation_outputs:
             print("No validation predictions to evaluate")
+            # Log zero metric so ModelCheckpoint doesn't fail
+            self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
             return
         
         # Save predictions for evaluation
@@ -343,8 +427,12 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 print(f"Segmentation evaluation failed: {e}")
         
         # Log metrics to TensorBoard
+        # Important: log mAP first and sync across all GPUs
+        self.log('val/mAP', metrics['mAP'], on_epoch=True, sync_dist=True, rank_zero_only=False)
+        
+        # Log all other metrics
         for metric_name, metric_value in metrics.items():
-            self.log(f'val/{metric_name}', metric_value, on_epoch=True, sync_dist=True)
+            self.log(f'val/{metric_name}', metric_value, on_epoch=True, sync_dist=True, rank_zero_only=False)
         
         # Clear validation outputs for next epoch
         self.validation_outputs = []
@@ -408,6 +496,13 @@ def main(config_path: Optional[str] = None):
         mode='train'  # Still use train mode to get targets
     )
     
+    # Create subset of validation dataset if max_val_images is specified
+    if config.max_val_images is not None and config.max_val_images < len(val_dataset):
+        from torch.utils.data import Subset
+        indices = list(range(config.max_val_images))
+        val_dataset = Subset(val_dataset, indices)
+        logger.info(f"Using subset of validation dataset: {config.max_val_images} images")
+    
     logger.info(f"Training dataset size: {len(train_dataset)}")
     logger.info(f"Validation dataset size: {len(val_dataset)}")
     
@@ -459,7 +554,7 @@ def main(config_path: Optional[str] = None):
     callbacks = [
         ModelCheckpoint(
             dirpath=str(run_dir),
-            filename='checkpoint-{epoch:02d}-{step}-{val/mAP:.4f}',
+            filename='checkpoint-{epoch:02d}-{step}',
             monitor='val/mAP',
             mode='max',
             save_top_k=3,
