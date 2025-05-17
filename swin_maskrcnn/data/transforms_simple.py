@@ -23,8 +23,20 @@ def get_transform_simple(train=True):
                 rotate=(-15, 15),
                 p=0.5
             ),
+            # Add normalization to match inference
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+                max_pixel_value=255.0  # For uint8 images
+            ),
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
     else:
         return A.Compose([
             A.Resize(height=512, width=512),
+            # Add normalization to match inference
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+                max_pixel_value=255.0  # For uint8 images
+            ),
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))

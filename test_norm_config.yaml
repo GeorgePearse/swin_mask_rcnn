@@ -1,0 +1,12 @@
+checkpoint_dir: ./test_norm_checkpoints
+img_root: /home/georgepearse/data/images
+log_interval: 5
+max_val_images: 10
+num_classes: 69
+num_epochs: 1
+num_workers: 0
+steps_per_validation: 10
+train_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json
+train_batch_size: 2
+val_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json
+val_batch_size: 2
