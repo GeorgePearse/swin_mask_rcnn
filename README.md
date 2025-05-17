@@ -253,6 +253,177 @@ dataset = CustomDataset(
 
 ## Architecture Details
 
+### Architecture Overview
+
+```mermaid
+graph TD
+    A[Input Image<br/>3×H×W] --> B[Swin Backbone<br/>4 Stages]
+    
+    B --> C1[Stage 1<br/>96 channels]
+    B --> C2[Stage 2<br/>192 channels]
+    B --> C3[Stage 3<br/>384 channels]
+    B --> C4[Stage 4<br/>768 channels]
+    
+    C1 --> D[FPN<br/>Feature Pyramid Network]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+    
+    D --> E1[P2: 1/4 scale]
+    D --> E2[P3: 1/8 scale]
+    D --> E3[P4: 1/16 scale]
+    D --> E4[P5: 1/32 scale]
+    D --> E5[P6: 1/64 scale]
+    
+    E1 --> F[RPN<br/>Region Proposal Network]
+    E2 --> F
+    E3 --> F
+    E4 --> F
+    E5 --> F
+    
+    F --> G[Proposals<br/>~1000 boxes]
+    
+    G --> H[ROI Align<br/>Detection: 7×7<br/>Segmentation: 14×14]
+    E1 --> H
+    E2 --> H
+    E3 --> H
+    E4 --> H
+    
+    H --> I[ROI Head]
+    
+    I --> J[Classification<br/>Per-class scores]
+    I --> K[Box Regression<br/>Refined boxes]
+    I --> L[Mask Prediction<br/>28×28 masks]
+    
+    J --> M[Final Predictions<br/>Boxes + Labels + Masks]
+    K --> M
+    L --> M
+    
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style M fill:#9f9,stroke:#333,stroke-width:2px
+    style F fill:#fcf,stroke:#333,stroke-width:2px
+    style I fill:#cff,stroke:#333,stroke-width:2px
+```
+
+### Detailed Data Flow
+
+```mermaid
+flowchart TB
+    subgraph "1. Image Preprocessing"
+        IMG[Input Image] --> NORM[Normalize & Transform]
+        NORM --> BATCH[Batch Tensor<br/>B×3×H×W]
+    end
+    
+    subgraph "2. Feature Extraction"
+        BATCH --> PATCH[Patch Embedding<br/>4×4 patches]
+        PATCH --> S1[Swin Stage 1<br/>Window Attention]
+        S1 --> S2[Swin Stage 2<br/>Shifted Windows]
+        S2 --> S3[Swin Stage 3<br/>Downsampling]
+        S3 --> S4[Swin Stage 4<br/>Global Features]
+    end
+    
+    subgraph "3. Multi-Scale Features"
+        S1 --> FPN1[Lateral Conv]
+        S2 --> FPN2[Lateral Conv]
+        S3 --> FPN3[Lateral Conv]
+        S4 --> FPN4[Lateral Conv]
+        
+        FPN4 --> P5[P5: 32× downsample]
+        FPN3 --> P4[P4: 16× downsample]
+        FPN2 --> P3[P3: 8× downsample]
+        FPN1 --> P2[P2: 4× downsample]
+        P5 --> P6[P6: 64× downsample<br/>MaxPool]
+    end
+    
+    subgraph "4. Object Proposals"
+        P2 & P3 & P4 & P5 & P6 --> RPNCLS[RPN Classification<br/>Object vs Background]
+        P2 & P3 & P4 & P5 & P6 --> RPNREG[RPN Regression<br/>Box Refinement]
+        
+        RPNCLS --> NMS1[Non-Max Suppression]
+        RPNREG --> NMS1
+        NMS1 --> PROPS[Top-K Proposals<br/>~1000-2000 boxes]
+    end
+    
+    subgraph "5. Region Analysis"
+        PROPS --> ROIALIGN1[ROI Align 7×7<br/>for Detection]
+        PROPS --> ROIALIGN2[ROI Align 14×14<br/>for Segmentation]
+        
+        P2 & P3 & P4 & P5 --> ROIALIGN1
+        P2 & P3 & P4 & P5 --> ROIALIGN2
+        
+        ROIALIGN1 --> FC[Fully Connected]
+        FC --> CLS[Classification Head]
+        FC --> REG[Box Regression Head]
+        
+        ROIALIGN2 --> CONV[Conv Layers]
+        CONV --> MASK[Mask Head<br/>28×28 per class]
+    end
+    
+    subgraph "6. Post-processing"
+        CLS --> SCORE[Confidence Scores]
+        REG --> BOX[Refined Boxes]
+        MASK --> SEGM[Instance Masks]
+        
+        SCORE & BOX --> NMS2[Class-wise NMS]
+        NMS2 & SEGM --> OUTPUT[Final Predictions]
+    end
+    
+    style IMG fill:#ff9999
+    style OUTPUT fill:#99ff99
+```
+
+### Training Loss Computation
+
+```mermaid
+graph LR
+    subgraph "Ground Truth"
+        GT[GT Boxes & Masks] --> GTBOX[GT Bounding Boxes]
+        GT --> GTMASK[GT Instance Masks]
+        GT --> GTLABEL[GT Labels]
+    end
+    
+    subgraph "RPN Losses"
+        RPNOUT[RPN Output] --> RPNCLS[RPN Classification]
+        RPNOUT --> RPNREG[RPN Regression]
+        
+        GTBOX --> RPNTARGET[RPN Target Assignment<br/>IoU > 0.7: positive<br/>IoU < 0.3: negative]
+        
+        RPNCLS --> RPNCLSLOSS[RPN Classification Loss<br/>Binary Cross-Entropy]
+        RPNREG --> RPNREGLOSS[RPN Regression Loss<br/>Smooth L1]
+        RPNTARGET --> RPNCLSLOSS
+        RPNTARGET --> RPNREGLOSS
+    end
+    
+    subgraph "ROI Losses"
+        ROIOUT[ROI Output] --> ROICLS[ROI Classification]
+        ROIOUT --> ROIREG[ROI Box Regression]
+        ROIOUT --> ROIMASK[ROI Mask Prediction]
+        
+        GTBOX --> ROITARGET[ROI Target Assignment<br/>IoU > 0.5: positive]
+        GTLABEL --> ROITARGET
+        GTMASK --> MASKTARGET[Mask Target<br/>28×28 Binary Masks]
+        
+        ROICLS --> ROICLSLOSS[ROI Classification Loss<br/>Cross-Entropy]
+        ROIREG --> ROIREGLOSS[ROI Regression Loss<br/>Smooth L1]
+        ROIMASK --> MASKLOSS[Mask Loss<br/>Binary Cross-Entropy]
+        
+        ROITARGET --> ROICLSLOSS
+        ROITARGET --> ROIREGLOSS
+        MASKTARGET --> MASKLOSS
+    end
+    
+    subgraph "Total Loss"
+        RPNCLSLOSS --> TOTAL[Total Loss<br/>Weighted Sum]
+        RPNREGLOSS --> TOTAL
+        ROICLSLOSS --> TOTAL
+        ROIREGLOSS --> TOTAL
+        MASKLOSS --> TOTAL
+    end
+    
+    style GT fill:#ffcc99
+    style TOTAL fill:#99ffcc
+```
+
 ### Model Components
 
 1. **SWIN Backbone**

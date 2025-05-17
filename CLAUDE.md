@@ -1,5 +1,17 @@
 # SWIN Mask R-CNN Project Instructions
 
+For any complicated question about the loss, architecture, or debugging the model, refer 
+back to the swin implementation in https://github.com/open-mmlab/mmdetection 
+
+Specifically the Swin-S model and key components:
+- **Swin Backbone**: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/backbones/swin.py
+- **Mask R-CNN**: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/detectors/mask_rcnn.py
+- **RPN Head**: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/dense_heads/rpn_head.py
+- **Standard ROI Head**: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/roi_heads/standard_roi_head.py
+- **FPN Neck**: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/necks/fpn.py
+
+For a comprehensive list of all mmdetection reference paths, see: `docs/mmdetection_reference_paths.md`
+
 Always default to writing logs statements instead of using print() 
 
 This file contains project-specific instructions for working with the SWIN Mask R-CNN codebase.
