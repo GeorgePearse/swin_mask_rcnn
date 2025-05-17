@@ -1,1 +1,3 @@
 epoch,batch_idx,image_filename,image_id,error_type,error_message
+0,194,120d-2025-04-03T22:53:28.376243566Z-191.jpg,309999,AssertionError,Shape mismatch: predictions 1 vs targets 513
+0,194,120d-2025-01-14T21:57:40.843912052Z-191.jpg,300271,AssertionError,Shape mismatch: predictions 1 vs targets 513

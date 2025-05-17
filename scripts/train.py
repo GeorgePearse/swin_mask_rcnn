@@ -320,8 +320,12 @@ class MaskRCNNLightningModule(pl.LightningModule):
             # Get original image ID from target
             image_id = targets[i]['image_id'].item()
             
-            # Skip if no predictions or no masks
-            if output['masks'] is None:
+            # Skip if no predictions at all (no boxes)
+            if len(output.get('boxes', [])) == 0:
+                continue
+                
+            # Handle the case where masks might be None for 0 predictions
+            if output.get('masks') is None:
                 continue
             
             # Track predictions by score threshold
@@ -369,6 +373,10 @@ class MaskRCNNLightningModule(pl.LightningModule):
         for threshold, count in threshold_counts.items():
             self.log(f'val/predictions_above_{threshold}', count, on_step=True, on_epoch=True, batch_size=batch_size)
         
+        # Log number of predictions made this batch
+        self.log('val/batch_predictions', len(batch_predictions), on_step=True, on_epoch=True, batch_size=batch_size)
+        self.log('val/batch_images_with_predictions', len([o for o in outputs if len(o.get('boxes', [])) > 0]), on_step=True, on_epoch=True, batch_size=batch_size)
+        
         # Return a dummy value for Lightning
         return {'predictions': len(batch_predictions)}
     
@@ -403,8 +411,11 @@ class MaskRCNNLightningModule(pl.LightningModule):
             
         if not self.validation_outputs:
             print("No validation predictions to evaluate")
+            print(f"Total validation outputs: {len(self.validation_outputs)}")
+            print(f"This can happen if all predictions have scores below the threshold or no masks")
             # Log zero metric so ModelCheckpoint doesn't fail
             self.log('val/mAP', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
+            self.log('val/mAP50', 0.0, on_epoch=True, sync_dist=True, rank_zero_only=False)
             return
         
         # Save predictions for evaluation
