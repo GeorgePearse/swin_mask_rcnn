@@ -39,10 +39,14 @@ class BBoxHead(nn.Module):
         nn.init.xavier_uniform_(self.fc_reg.weight)
         nn.init.constant_(self.shared_fc1.bias, 0)
         nn.init.constant_(self.shared_fc2.bias, 0)
-        # Initialize classification bias to favor background class
-        # This helps stabilize initial training
-        nn.init.constant_(self.fc_cls.bias, 0)
-        self.fc_cls.bias.data[0] = 0.5  # Small bias toward background (was 2.0)
+        # Initialize classification biases to encourage more detections
+        # Use focal loss-style initialization for better training
+        pi = 0.01  # probability of foreground
+        bias_bg = -torch.log(torch.tensor((1 - pi) / pi)).item()
+        bias_fg = -torch.log(torch.tensor(pi / (1 - pi))).item()
+        
+        nn.init.constant_(self.fc_cls.bias, bias_fg)  # Foreground bias
+        self.fc_cls.bias.data[0] = bias_bg  # Background bias
         nn.init.constant_(self.fc_reg.bias, 0)
         
     def forward(self, roi_feats):
@@ -123,7 +127,11 @@ class StandardRoIHead(nn.Module):
         pos_iou_thr=0.5,
         neg_iou_thr=0.5,
         pos_ratio=0.25,
-        num_samples=512
+        num_samples=512,
+        cls_pos_weight=1.0,
+        loss_cls_weight=1.0,
+        loss_bbox_weight=1.0,
+        loss_mask_weight=1.0
     ):
         super().__init__()
         
@@ -155,8 +163,18 @@ class StandardRoIHead(nn.Module):
         self.pos_ratio = pos_ratio
         self.num_samples = num_samples
         
+        # Loss weights
+        self.cls_pos_weight = cls_pos_weight
+        self.loss_cls_weight = loss_cls_weight
+        self.loss_bbox_weight = loss_bbox_weight
+        self.loss_mask_weight = loss_mask_weight
+        
     def forward(self, features, proposals, targets=None):
         """Forward pass through ROI head."""
+        labels = None
+        bbox_targets = None
+        mask_targets = None
+        
         if self.training and targets is not None:
             # Sample proposals
             proposals, labels, bbox_targets, mask_targets = self.sample_proposals(
@@ -439,24 +457,32 @@ class StandardRoIHead(nn.Module):
         return torch.stack(mask_targets)
     
     def loss(self, cls_scores, bbox_preds, mask_preds, labels, bbox_targets, mask_targets):
-        """Calculate losses."""
+        """Calculate losses with proper normalization."""
         losses = {}
         
         # Concatenate labels from all images
         all_labels = torch.cat(labels)
         
-        # Classification loss
-        cls_loss = F.cross_entropy(cls_scores, all_labels)
-        losses['cls_loss'] = cls_loss
+        # Calculate avg_factor for classification
+        # Count valid samples (not ignored)
+        avg_factor = max(len(all_labels), 1.0)
         
-        # Bbox regression loss
+        # Classification loss with avg_factor
+        if self.cls_pos_weight > 1.0:
+            # Apply positive weight to foreground classes
+            weight = torch.ones_like(all_labels, dtype=torch.float32)
+            weight[all_labels > 0] = self.cls_pos_weight
+            cls_loss = F.cross_entropy(cls_scores, all_labels, weight=weight)
+        else:
+            cls_loss = F.cross_entropy(cls_scores, all_labels)
+            
+        losses['cls_loss'] = cls_loss * self.loss_cls_weight
+        
+        # Bbox regression loss with normalization by positive samples
+        pos_mask = all_labels > 0
+        num_pos = max(pos_mask.sum().item(), 1.0)
+        
         if len(bbox_targets) > 0 and any(len(t) > 0 for t in bbox_targets):
-            # Since predictions are concatenated, we need to work with concatenated labels/targets
-            all_labels = torch.cat(labels)
-            
-            # Get positive mask
-            pos_mask = all_labels > 0
-            
             if pos_mask.any():
                 # Get positive predictions
                 pos_bbox_preds = bbox_preds[pos_mask]
@@ -473,21 +499,20 @@ class StandardRoIHead(nn.Module):
                 assert pos_bbox_preds.shape[0] == bbox_targets_concat.shape[0], \
                     f"Shape mismatch: predictions {pos_bbox_preds.shape[0]} vs targets {bbox_targets_concat.shape[0]}"
                 
-                bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets_concat)
+                bbox_loss = F.smooth_l1_loss(pos_bbox_preds, bbox_targets_concat, reduction='sum')
+                bbox_loss = bbox_loss / num_pos
             else:
                 bbox_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
             bbox_loss = torch.tensor(0.0, device=cls_scores.device)
-        losses['bbox_loss'] = bbox_loss
+            
+        losses['bbox_loss'] = bbox_loss * self.loss_bbox_weight
         
-        # Mask loss
+        # Mask loss with normalization
         if mask_preds is not None and len(mask_targets) > 0:
             # Mask predictions are already only for positive samples
             # They come in shape [N_pos, num_classes, 28, 28]
             # We need to select the predictions for the correct classes
-            all_labels = torch.cat(labels)
-            pos_mask = all_labels > 0
-            
             if pos_mask.any():
                 pos_labels = all_labels[pos_mask]
                 mask_targets_concat = torch.cat(mask_targets)
@@ -499,12 +524,16 @@ class StandardRoIHead(nn.Module):
                 
                 assert selected_mask_preds.shape[0] == mask_targets_concat.shape[0], \
                     f"Shape mismatch: predictions {selected_mask_preds.shape[0]} vs targets {mask_targets_concat.shape[0]}"
-                mask_loss = F.binary_cross_entropy_with_logits(selected_mask_preds, mask_targets_concat)
+                mask_loss = F.binary_cross_entropy_with_logits(
+                    selected_mask_preds, mask_targets_concat, reduction='sum'
+                )
+                mask_loss = mask_loss / num_pos
             else:
                 mask_loss = torch.tensor(0.0, device=cls_scores.device)
         else:
             mask_loss = torch.tensor(0.0, device=cls_scores.device)
-        losses['mask_loss'] = mask_loss
+            
+        losses['mask_loss'] = mask_loss * self.loss_mask_weight
         
         return losses
     
@@ -516,11 +545,11 @@ class StandardRoIHead(nn.Module):
         # Get predicted classes and scores
         scores, pred_labels = cls_probs.max(dim=1)
         
-        # Debug: Print score statistics
-        if hasattr(self, 'logger') and self.logger:
-            self.logger.debug(f"Raw scores - min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
-            self.logger.debug(f"Predicted labels distribution: {torch.bincount(pred_labels).tolist()}")
-            self.logger.debug(f"Number of non-background predictions: {(pred_labels > 0).sum()}")
+        # Enhanced debugging
+        print(f"[ROI] Score stats - min: {scores.min():.4f}, max: {scores.max():.4f}, mean: {scores.mean():.4f}")
+        print(f"[ROI] Background probs - min: {cls_probs[:, 0].min():.4f}, max: {cls_probs[:, 0].max():.4f}, mean: {cls_probs[:, 0].mean():.4f}")
+        print(f"[ROI] Predicted labels distribution: {torch.bincount(pred_labels).tolist()}")
+        print(f"[ROI] Number of non-background predictions: {(pred_labels > 0).sum()}")
         
         # Track number of proposals per image for proper splitting
         proposal_splits = [len(p) for p in proposals]

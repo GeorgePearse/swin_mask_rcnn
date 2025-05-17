@@ -1,78 +1,58 @@
-"""Test simple inference without the full pipeline."""
+"""Simple inference test to check detection behavior."""
+
 import torch
 import numpy as np
-from PIL import Image
-import cv2
-from pathlib import Path
 from swin_maskrcnn.models.mask_rcnn import SwinMaskRCNN
-from torchvision.transforms import Compose, ToTensor, Normalize
 
 
-def simple_inference(checkpoint_path, image_path, num_classes=69):
-    """Run simple inference test."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Load model
-    model = SwinMaskRCNN(num_classes=num_classes)
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
+def create_dummy_image(size=(3, 224, 224)):
+    """Create a dummy image with some structure."""
+    img = torch.rand(size)
+    # Add some structured patterns
+    h, w = size[1], size[2]
+    # Add a bright rectangle in the center
+    img[:, h//4:3*h//4, w//4:3*w//4] += 0.5
+    # Add another smaller rectangle
+    img[:, h//3:2*h//3, w//3:2*w//3] += 0.3
+    return img.clamp(0, 1)
+
+
+def main():
+    # Create model without pretrained weights
+    print("Creating model...")
+    model = SwinMaskRCNN(num_classes=69, frozen_backbone_stages=-1)
     model.eval()
     
-    # Load and preprocess image
-    image = Image.open(image_path).convert('RGB')
+    # Test with dummy data
+    print("\nTesting with dummy images...")
+    batch_size = 2
+    images = [create_dummy_image() for _ in range(batch_size)]
     
-    # Simple transform - just convert to tensor and normalize
-    transform = Compose([
-        ToTensor(),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    img_tensor = transform(image).unsqueeze(0).to(device)
-    
-    print(f"Image tensor shape: {img_tensor.shape}")
-    
-    # First test - raw forward pass
-    print("\n=== Testing raw forward pass ===")
     with torch.no_grad():
-        outputs = model(img_tensor)
-    
-    print(f"Number of outputs: {len(outputs)}")
-    for i, output in enumerate(outputs):
-        print(f"\nImage {i} predictions:")
-        for k, v in output.items():
-            if isinstance(v, torch.Tensor):
-                print(f"  {k}: shape={v.shape}")
-                if v.numel() > 0:
-                    print(f"    min={v.min():.4f}, max={v.max():.4f}, mean={v.mean():.4f}")
-                    if k == 'scores' and v.numel() > 0:
-                        print(f"    Top 5 scores: {v[:5].tolist()}")
-                        print(f"    Number of predictions: {len(v)}")
+        # Test initial prediction behavior
+        predictions = model(images)
+        
+        print(f"\nResults for {batch_size} images:")
+        for i, pred in enumerate(predictions):
+            if pred and 'boxes' in pred:
+                num_boxes = len(pred['boxes'])
+                print(f"Image {i}: {num_boxes} detections")
+                if num_boxes > 0:
+                    scores = pred['scores'].numpy()
+                    print(f"  Score range: [{scores.min():.3f}, {scores.max():.3f}]")
+                    print(f"  Mean score: {scores.mean():.3f}")
+                    # Count by score threshold
+                    thresholds = [0.01, 0.05, 0.1, 0.3, 0.5]
+                    for t in thresholds:
+                        count = (scores >= t).sum()
+                        print(f"  Detections with score >= {t}: {count}")
             else:
-                print(f"  {k}: {v}")
+                print(f"Image {i}: No detections")
     
-    # Second test - predict method
-    print("\n=== Testing predict method ===")
-    predictions = model.predict(img_tensor, score_threshold=0.01, nms_threshold=0.5)
-    
-    for i, pred in enumerate(predictions):
-        print(f"\nImage {i} filtered predictions:")
-        for k, v in pred.items():
-            if isinstance(v, torch.Tensor):
-                print(f"  {k}: shape={v.shape}")
-                if k == 'scores' and v.numel() > 0:
-                    print(f"    Top 5 scores: {v[:5].tolist()}")
-                    print(f"    Scores > 0.1: {(v > 0.1).sum()}")
-                    print(f"    Scores > 0.5: {(v > 0.5).sum()}")
-    
-    return outputs, predictions
+    print("\nNote: This is with randomly initialized weights (no pretraining)")
+    print("The key is that the model should still produce some detections")
+    print("rather than suppressing everything to background.")
 
 
 if __name__ == "__main__":
-    checkpoint_path = "test_checkpoints/checkpoint_step_200.pth"
-    image_path = "/home/georgepearse/data/images/2024-04-11T10:13:35.128372706Z-53.jpg"
-    
-    outputs, predictions = simple_inference(checkpoint_path, image_path)
+    main()

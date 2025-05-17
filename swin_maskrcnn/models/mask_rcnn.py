@@ -24,10 +24,17 @@ class SwinMaskRCNN(nn.Module):
         rpn_neg_threshold=0.3,
         rpn_batch_size=256,
         rpn_positive_fraction=0.5,
+        rpn_cls_pos_weight=1.0,
+        rpn_loss_cls_weight=1.0,
+        rpn_loss_bbox_weight=1.0,
         box_pos_threshold=0.5,
         box_neg_threshold=0.5,
         box_batch_size=512,
         box_positive_fraction=0.25,
+        roi_cls_pos_weight=1.0,
+        roi_loss_cls_weight=1.0,
+        roi_loss_bbox_weight=1.0,
+        roi_loss_mask_weight=1.0,
         fpn_out_channels=256,
         roi_pool_size=7,
         mask_roi_pool_size=14,
@@ -77,6 +84,9 @@ class SwinMaskRCNN(nn.Module):
             feat_channels=fpn_out_channels,
             pos_iou_thr=rpn_pos_threshold,
             neg_iou_thr=rpn_neg_threshold,
+            cls_pos_weight=rpn_cls_pos_weight,
+            loss_cls_weight=rpn_loss_cls_weight,
+            loss_bbox_weight=rpn_loss_bbox_weight,
         )
         
         # ROI Head
@@ -85,7 +95,11 @@ class SwinMaskRCNN(nn.Module):
             pos_iou_thr=box_pos_threshold,
             neg_iou_thr=box_neg_threshold,
             pos_ratio=box_positive_fraction,
-            num_samples=box_batch_size
+            num_samples=box_batch_size,
+            cls_pos_weight=roi_cls_pos_weight,
+            loss_cls_weight=roi_loss_cls_weight,
+            loss_bbox_weight=roi_loss_bbox_weight,
+            loss_mask_weight=roi_loss_mask_weight,
         )
         
         self.num_classes = num_classes
@@ -147,6 +161,10 @@ class SwinMaskRCNN(nn.Module):
             rpn_losses = None
             
             # Debug: log number of proposals
+            if proposals is not None and len(proposals) > 0:
+                print(f"[DEBUG] RPN proposals for batch: {[len(p) for p in proposals]}")
+            else:
+                print(f"[DEBUG] No RPN proposals generated")
             if hasattr(self, 'logger') and self.logger:
                 total_proposals = sum(len(p) for p in proposals)
                 self.logger.debug(f"RPN generated {total_proposals} proposals for {len(proposals)} images")
@@ -163,6 +181,30 @@ class SwinMaskRCNN(nn.Module):
             return losses
         else:
             detections = self.roi_head(features, proposals)
+            # Debug: log detections with more detail
+            if detections is not None and len(detections) > 0:
+                total_detections = sum(len(d.get('boxes', [])) for d in detections)
+                print(f"[DEBUG] Total detections: {total_detections}, per image: {[len(d.get('boxes', [])) for d in detections]}")
+                
+                # Log score distribution
+                all_scores = []
+                for d in detections:
+                    if 'scores' in d and len(d['scores']) > 0:
+                        all_scores.extend(d['scores'].cpu().numpy().tolist())
+                
+                if all_scores:
+                    import numpy as np
+                    scores_np = np.array(all_scores)
+                    print(f"[DEBUG] Score statistics - count: {len(scores_np)}, "
+                          f"min: {scores_np.min():.4f}, max: {scores_np.max():.4f}, "
+                          f"mean: {scores_np.mean():.4f}, std: {scores_np.std():.4f}")
+                    
+                    # Score histogram
+                    score_bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                    hist, _ = np.histogram(scores_np, bins=score_bins)
+                    print(f"[DEBUG] Score histogram (0-0.1, 0.1-0.2, ...): {hist.tolist()}")
+            else:
+                print(f"[DEBUG] No detections from ROI head")
             return detections
     
     @torch.no_grad()

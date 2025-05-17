@@ -7,7 +7,7 @@ num_classes: 69
 # Training parameters
 train_batch_size: 2
 val_batch_size: 1  # Reduced to avoid OOM
-num_workers: 0
+num_workers: 7
 lr: 0.001
 momentum: 0.9
 weight_decay: 0.0001
@@ -40,3 +40,4 @@ frozen_backbone_stages: -1
 
 # Validation settings
 validation_iou_thresh: 0.5
+max_val_images: 20  # Only 20 images for quick testing

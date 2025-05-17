@@ -19,7 +19,7 @@ sgd_momentum: 0.9
 weight_decay: 0.0001
 warmup_steps: 1000
 batch_size: 2
-num_workers: 4
+num_workers: 7
 precision: 32
 device: 'cuda'
 seed: 42

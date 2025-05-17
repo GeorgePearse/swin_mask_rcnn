@@ -68,6 +68,9 @@ class RPNHead(nn.Module):
         pos_iou_thr=0.7,
         neg_iou_thr=0.3,
         num_neg_ratio=1.0,
+        cls_pos_weight=1.0,
+        loss_cls_weight=1.0,
+        loss_bbox_weight=1.0,
     ):
         super().__init__()
         
@@ -85,6 +88,11 @@ class RPNHead(nn.Module):
         self.neg_iou_thr = neg_iou_thr
         self.num_neg_ratio = num_neg_ratio
         
+        # Loss weights
+        self.cls_pos_weight = cls_pos_weight
+        self.loss_cls_weight = loss_cls_weight
+        self.loss_bbox_weight = loss_bbox_weight
+        
         # Loss functions
         self.loss_cls = nn.BCEWithLogitsLoss(reduction='none')
         self.loss_bbox = nn.SmoothL1Loss(reduction='none')
@@ -97,10 +105,11 @@ class RPNHead(nn.Module):
         nn.init.normal_(self.rpn_cls.weight, std=0.01)
         nn.init.normal_(self.rpn_reg.weight, std=0.01)
         nn.init.constant_(self.rpn_conv.bias, 0)
-        # Initialize cls bias to predict background with high probability
-        # log(0.99 / 0.01) = -4.59 means initial prediction will be ~0.01 foreground
-        # Reduce bias for better initial detection performance
-        nn.init.constant_(self.rpn_cls.bias, -2.0)  # Was -4.59, now less extreme
+        # Initialize cls bias with focal loss-style initialization
+        # This helps with the foreground/background imbalance
+        pi = 0.01  # probability of foreground
+        bias_value = -torch.log(torch.tensor(pi / (1 - pi))).item()
+        nn.init.constant_(self.rpn_cls.bias, bias_value)
         nn.init.constant_(self.rpn_reg.bias, 0)
         
     def forward(self, features):
@@ -131,10 +140,14 @@ class RPNHead(nn.Module):
         return anchors
     
     def loss(self, cls_scores, bbox_preds, gt_bboxes, img_sizes):
-        """Calculate RPN loss."""
+        """Calculate RPN loss with proper normalization."""
         device = cls_scores[0].device
         featmap_sizes = [score.shape[-2:] for score in cls_scores]
         anchors = self.get_anchors(featmap_sizes, device)
+        
+        # Count total samples for normalization
+        total_pos = 0
+        total_neg = 0
         
         # Match anchors to ground truth
         cls_targets = []
@@ -191,15 +204,31 @@ class RPNHead(nn.Module):
             bbox_targets.append(img_bbox_targets)
             pos_indices.append(img_pos_indices)
         
-        # Calculate losses
-        cls_loss = self._cls_loss(cls_scores, cls_targets)
-        bbox_loss = self._bbox_loss(bbox_preds, bbox_targets, pos_indices)
+        # Count samples for avg_factor
+        for img_targets in cls_targets:
+            for level_targets in img_targets:
+                valid_mask = level_targets >= 0
+                pos_mask = level_targets == 1
+                neg_mask = level_targets == 0
+                total_pos += pos_mask.sum().item()
+                total_neg += neg_mask.sum().item()
         
-        return {'rpn_cls_loss': cls_loss, 'rpn_bbox_loss': bbox_loss}
+        # Calculate avg_factor (following MMDetection)
+        avg_factor = max(total_pos + total_neg, 1.0)
+        
+        # Calculate losses with proper normalization
+        cls_loss = self._cls_loss(cls_scores, cls_targets, avg_factor)
+        bbox_loss = self._bbox_loss(bbox_preds, bbox_targets, pos_indices, max(total_pos, 1.0))
+        
+        return {
+            'rpn_cls_loss': cls_loss * self.loss_cls_weight,
+            'rpn_bbox_loss': bbox_loss * self.loss_bbox_weight
+        }
     
-    def _cls_loss(self, cls_scores, cls_targets):
-        """Calculate classification loss."""
+    def _cls_loss(self, cls_scores, cls_targets, avg_factor):
+        """Calculate classification loss with proper normalization."""
         loss = torch.tensor(0.0, device=cls_scores[0].device)
+        eps = 1e-6  # For numerical stability
         
         # Process each batch item separately
         batch_size = cls_scores[0].size(0)
@@ -215,12 +244,25 @@ class RPNHead(nn.Module):
                     # Only calculate loss for valid targets (exclude -1)
                     valid_mask = targets >= 0
                     if valid_mask.any():
-                        loss = loss + self.loss_cls(scores[valid_mask], targets[valid_mask].float()).mean()
-        return loss
+                        valid_scores = scores[valid_mask]
+                        valid_targets = targets[valid_mask].float()
+                        
+                        # Apply positive weight to foreground samples
+                        weight = torch.ones_like(valid_targets)
+                        weight[valid_targets == 1] = self.cls_pos_weight
+                        
+                        batch_loss = F.binary_cross_entropy_with_logits(
+                            valid_scores, valid_targets, weight=weight, reduction='sum'
+                        )
+                        loss = loss + batch_loss
+        
+        # Normalize by avg_factor
+        return loss / (avg_factor + eps)
     
-    def _bbox_loss(self, bbox_preds, bbox_targets, pos_indices):
-        """Calculate bounding box regression loss."""
+    def _bbox_loss(self, bbox_preds, bbox_targets, pos_indices, avg_factor):
+        """Calculate bounding box regression loss with proper normalization."""
         loss = torch.tensor(0.0, device=bbox_preds[0].device)
+        eps = 1e-6
         
         # Process each batch item separately
         batch_size = bbox_preds[0].size(0)
@@ -241,8 +283,10 @@ class RPNHead(nn.Module):
                     if targets.numel() > 0 and indices.numel() > 0:
                         # Index predictions at positive anchor locations
                         pos_preds = preds[indices]
-                        loss = loss + self.loss_bbox(pos_preds, targets).mean()
-        return loss
+                        loss = loss + self.loss_bbox(pos_preds, targets).sum()
+        
+        # Normalize by number of positive samples
+        return loss / (avg_factor + eps)
     
     def encode_bbox(self, anchors, gt_bboxes):
         """Encode bounding box targets."""
@@ -309,6 +353,11 @@ class RPNHead(nn.Module):
             # Apply sigmoid to get probabilities
             img_cls_scores = torch.sigmoid(img_cls_scores)
             
+            # Debug logging
+            print(f"[RPN] Image {img_idx}: Total anchors: {len(img_anchors)}")
+            print(f"[RPN] Score stats - min: {img_cls_scores.min():.4f}, max: {img_cls_scores.max():.4f}, mean: {img_cls_scores.mean():.4f}")
+            print(f"[RPN] Number of high-scoring anchors (>0.5): {(img_cls_scores > 0.5).sum()}")
+            
             # Decode bboxes
             decoded_bboxes = self.decode_bbox(img_anchors, img_bbox_preds)
             
@@ -337,5 +386,6 @@ class RPNHead(nn.Module):
             keep = keep[:max_per_img]
             
             proposals.append(decoded_bboxes[keep])
+            print(f"[RPN] Final proposals for image {img_idx}: {len(keep)}")
         
         return proposals

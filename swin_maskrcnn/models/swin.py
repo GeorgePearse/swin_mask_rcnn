@@ -358,10 +358,14 @@ class PatchEmbed(nn.Module):
         if pad_h > 0 or pad_w > 0:
             x = F.pad(x, (0, pad_w, 0, pad_h))
         
+        # Calculate patch grid dimensions after padding
+        Ph = (H + pad_h) // self.patch_size
+        Pw = (W + pad_w) // self.patch_size
+        
         x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
         if self.norm is not None:
             x = self.norm(x)
-        return x
+        return x, Ph, Pw
         
 
 class SwinTransformer(nn.Module):
@@ -487,12 +491,11 @@ class SwinTransformer(nn.Module):
                     
     def forward(self, x):
         B, C, H_img, W_img = x.shape
-        x = self.patch_embed(x)
+        x, H, W = self.patch_embed(x)
         B, L, C = x.shape
         
-        # Calculate actual patch resolution
-        H = W = int(math.sqrt(L))
-        assert H * W == L, f"L ({L}) must be a perfect square"
+        # Verify patch dimensions
+        assert H * W == L, f"Patch dimensions mismatch: {H}*{W} != {L}"
         
         if self.ape:
             x = x + self.absolute_pos_embed

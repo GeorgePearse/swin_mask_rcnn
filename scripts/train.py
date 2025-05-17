@@ -26,6 +26,7 @@ from swin_maskrcnn.utils.collate import collate_fn
 from scripts.config import TrainingConfig
 from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
 from swin_maskrcnn.utils.logging import setup_logger
+from swin_maskrcnn.utils.load_coco_weights import load_coco_weights
 from swin_maskrcnn.callbacks import ONNXExportCallback
 
 
@@ -78,12 +79,30 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Initialize model
         self.model = SwinMaskRCNN(
             num_classes=config.num_classes,
-            frozen_backbone_stages=config.frozen_backbone_stages
+            frozen_backbone_stages=config.frozen_backbone_stages,
+            rpn_cls_pos_weight=config.rpn_cls_pos_weight,
+            rpn_loss_cls_weight=config.rpn_loss_cls_weight,
+            rpn_loss_bbox_weight=config.rpn_loss_bbox_weight,
+            roi_cls_pos_weight=config.roi_cls_pos_weight,
+            roi_loss_cls_weight=config.roi_loss_cls_weight,
+            roi_loss_bbox_weight=config.roi_loss_bbox_weight,
+            roi_loss_mask_weight=config.roi_loss_mask_weight,
         )
         
         # Load pretrained weights if specified
-        if config.pretrained_backbone and config.pretrained_checkpoint_url:
-            load_pretrained_from_url(self.model, config.pretrained_checkpoint_url, strict=False)
+        if config.pretrained_backbone:
+            # Always load COCO pretrained weights with proper initialization
+            print("Loading COCO pretrained weights...")
+            missing_keys, unexpected_keys = load_coco_weights(self.model, num_classes=config.num_classes)
+            print(f"Missing keys: {len(missing_keys)}")
+            print(f"Unexpected keys: {len(unexpected_keys)}")
+            
+            # Log some diagnostic info about the model
+            if hasattr(self.model.roi_head, 'fc_cls'):
+                cls_bias = self.model.roi_head.fc_cls.bias.detach().cpu().numpy()
+                print(f"Background bias after loading: {cls_bias[0]:.4f}")
+                print(f"Object bias mean: {cls_bias[1:].mean():.4f}")
+                print(f"Object bias range: [{cls_bias[1:].min():.4f}, {cls_bias[1:].max():.4f}]")
         
         # Save hyperparameters
         self.save_hyperparameters()
@@ -97,7 +116,7 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Validation predictions storage
         self.validation_outputs = []
         
-        # Loss weights
+        # Loss weights - adjust to help with detection stability
         self.loss_weights = {
             'rpn_cls_loss': 1.0,
             'rpn_bbox_loss': 1.0,
@@ -169,7 +188,47 @@ class MaskRCNNLightningModule(pl.LightningModule):
                         t_device[k] = v  # Keep string fields (like image_filename) as is
                 targets_device.append(t_device)
             
-            # Forward pass
+            # Make predictions (inference mode) to count end-to-end predictions
+            self.model.eval()
+            with torch.no_grad():
+                predictions = self.model(images)
+                
+                # Count predictions per image
+                pred_counts = []
+                for pred in predictions:
+                    if pred is not None and 'boxes' in pred:
+                        num_preds = len(pred['boxes'])
+                    else:
+                        num_preds = 0
+                    pred_counts.append(num_preds)
+                
+                total_predictions = sum(pred_counts)
+                avg_predictions = total_predictions / len(predictions) if predictions else 0
+                
+                # Log prediction statistics
+                self.log('train/total_predictions', total_predictions, on_step=True, on_epoch=True, prog_bar=True)
+                self.log('train/avg_predictions_per_image', avg_predictions, on_step=True, on_epoch=True)
+                self.log('train/images_with_predictions', sum(1 for c in pred_counts if c > 0), on_step=True, on_epoch=True)
+                
+                # Log number of annotations per image for comparison
+                annotation_counts = []
+                for target in targets_device:
+                    if 'boxes' in target:
+                        annotation_counts.append(len(target['boxes']))
+                    else:
+                        annotation_counts.append(0)
+                
+                total_annotations = sum(annotation_counts)
+                avg_annotations = total_annotations / len(annotation_counts) if annotation_counts else 0
+                
+                self.log('train/total_annotations', total_annotations, on_step=True, on_epoch=True, prog_bar=True)
+                self.log('train/avg_annotations_per_image', avg_annotations, on_step=True, on_epoch=True)
+                self.log('train/images_with_annotations', sum(1 for c in annotation_counts if c > 0), on_step=True, on_epoch=True)
+            
+            # Back to training mode for loss calculation
+            self.model.train()
+            
+            # Forward pass for training loss
             loss_dict = self.forward(images, targets_device)
             
             # Weight the losses
@@ -182,8 +241,12 @@ class MaskRCNNLightningModule(pl.LightningModule):
             
             # Log losses to TensorBoard
             self.log('train/loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+            # Log both raw and weighted losses for better debugging
             for k, v in loss_dict.items():
                 self.log(f'train/{k}', v, on_step=True, on_epoch=True)
+                weight = self.loss_weights.get(k, 1.0)
+                if weight != 1.0:
+                    self.log(f'train/{k}_weighted', v * weight, on_step=True, on_epoch=True)
             
             # Log memory usage
             memory_mb = get_gpu_memory_mb()
@@ -246,6 +309,10 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Store predictions for COCO evaluation
         batch_predictions = []
         
+        # Track prediction statistics
+        score_thresholds = [0.001, 0.01, 0.05, 0.1, 0.3, 0.5, 0.7, 0.9]
+        threshold_counts = {t: 0 for t in score_thresholds}
+        
         # Process each image
         for i, output in enumerate(outputs):
             # Get original image ID from target
@@ -254,6 +321,11 @@ class MaskRCNNLightningModule(pl.LightningModule):
             # Skip if no predictions or no masks
             if output['masks'] is None:
                 continue
+            
+            # Track predictions by score threshold
+            scores = output['scores'].cpu().numpy()
+            for threshold in score_thresholds:
+                threshold_counts[threshold] += (scores >= threshold).sum()
             
             # Convert predictions to COCO format
             for j, (box, label, score, mask) in enumerate(zip(
@@ -290,6 +362,10 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 })
         
         self.validation_outputs.extend(batch_predictions)
+        
+        # Log prediction statistics by threshold
+        for threshold, count in threshold_counts.items():
+            self.log(f'val/predictions_above_{threshold}', count, on_step=True, on_epoch=True)
         
         # Return a dummy value for Lightning
         return {'predictions': len(batch_predictions)}

@@ -22,7 +22,16 @@ class TrainingConfig(BaseModel):
     )
     
     # Model parameters
-    num_classes: int = Field(default=69, description="Number of classes in dataset")
+    num_classes: int = Field(default=70, description="Number of classes including background (69 objects + 1 background)")
+    
+    # Loss parameters
+    rpn_cls_pos_weight: float = Field(default=1.0, description="RPN classification positive weight")
+    rpn_loss_cls_weight: float = Field(default=1.0, description="RPN classification loss weight")
+    rpn_loss_bbox_weight: float = Field(default=1.0, description="RPN bbox regression loss weight")
+    roi_cls_pos_weight: float = Field(default=1.0, description="ROI classification positive weight")
+    roi_loss_cls_weight: float = Field(default=1.0, description="ROI classification loss weight")
+    roi_loss_bbox_weight: float = Field(default=1.0, description="ROI bbox regression loss weight")
+    roi_loss_mask_weight: float = Field(default=1.0, description="ROI mask loss weight")
     
     # Training parameters
     train_batch_size: int = Field(default=4, description="Batch size for training")
@@ -95,6 +104,10 @@ class TrainingConfig(BaseModel):
     validation_iou_thresh: float = Field(
         default=0.5,
         description="IoU threshold for validation metrics"
+    )
+    max_val_images: Optional[int] = Field(
+        default=None,
+        description="Maximum number of validation images to process (None for all)"
     )
 
     model_config = ConfigDict(validate_assignment=True)
