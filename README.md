@@ -62,6 +62,29 @@ A clean, standalone implementation of SWIN-based Mask R-CNN without dependencies
 - **FiftyOne Integration**: Visualize predictions with interactive tools
 - **Export Formats**: Save predictions in COCO format
 
+## Project Structure
+
+```
+swin_maskrcnn/
+├── swin_maskrcnn/          # Main package directory
+│   ├── models/             # Neural network architectures
+│   ├── data/               # Data loading and transforms
+│   ├── training/           # Training logic
+│   ├── inference/          # Inference utilities
+│   ├── callbacks/          # Training callbacks  
+│   └── utils/              # Utilities
+├── scripts/                # Standalone scripts
+│   ├── config/             # Configuration files
+│   ├── debug/              # Debug and diagnostic scripts
+│   └── tests/              # Test scripts for validation
+├── tests/                  # Unit tests
+├── examples/               # Usage examples
+├── docs/                   # Documentation
+├── logs/                   # Training and debug logs
+├── checkpoints/            # Model checkpoints
+└── predictions/            # Prediction outputs
+```
+
 ## Installation
 
 ```bash
