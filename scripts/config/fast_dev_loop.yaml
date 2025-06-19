@@ -1,4 +1,4 @@
-# Optimized config for fast development loops with class-level metrics
+# Fast development loop config for rapid iteration
 train_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:23.077836_train_ordered.json
 val_ann: /home/georgepearse/data/cmr/annotations/2025-05-15_12:38:38.270134_val_ordered.json
 img_root: /home/georgepearse/data/images
@@ -13,43 +13,47 @@ roi_loss_cls_weight: 1.0
 roi_loss_bbox_weight: 1.0
 roi_loss_mask_weight: 1.0
 
-# Training parameters for fast feedback
+# Training parameters
 train_batch_size: 2
-val_batch_size: 4  # Larger for faster validation
+val_batch_size: 2
 num_workers: 4
 lr: 0.0001
 momentum: 0.9
 weight_decay: 0.05
-num_epochs: 1
+num_epochs: 2  # Short epochs for testing
 
 # Fast validation settings
-steps_per_validation: 20  # Very frequent validation
-validation_start_step: 20  # Start validation early
-max_val_images: 20  # Small validation set for speed
+steps_per_validation: 20  # Full validation every 20 steps
+validation_start_step: 20  # Start validation after 20 steps
 
-# Quick evaluation for even faster feedback
+# Quick evaluation settings (new)
 quick_eval_enabled: true
-quick_eval_interval: 10  # Every 10 steps
-quick_eval_samples: 10  # Very small subset
-track_top_k_classes: 5  # Track fewer classes for clarity
+quick_eval_interval: 10  # Quick eval every 10 steps
+quick_eval_samples: 5  # Use only 5 samples for quick eval
+track_top_k_classes: 10  # Track top 10 classes in detail
 
 # Gradient clipping
 clip_grad_norm: 10.0
 
 # Checkpointing and logging
 checkpoint_dir: ./fast_dev_checkpoints
-log_interval: 5  # Frequent logging
+log_interval: 5
 save_interval: null
 
-# Optimizer and scheduler
+# Optimizer choice
 optimizer: adamw
-use_scheduler: false  # Disable for consistent learning
-use_amp: true  # Enable for faster training
+
+# Learning rate scheduler
+use_scheduler: false
+
+# Mixed precision training
+use_amp: false
 
 # Model settings
 pretrained_backbone: true
 pretrained_checkpoint_url: https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco/mask_rcnn_swin-s-p4-w7_fpn_fp16_ms-crop-3x_coco_20210903_104808-b92c91f1.pth
-frozen_backbone_stages: 3  # Freeze more for faster training
+frozen_backbone_stages: 3  # Freeze more stages for faster training
 
 # Validation settings
 validation_iou_thresh: 0.5
+max_val_images: 20  # Small validation set for fast feedback

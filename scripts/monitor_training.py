@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-"""
-Real-time training monitor for SWIN Mask R-CNN.
-
-This script monitors the metrics exported by MetricsTracker callback
-and displays them in a terminal-friendly format.
-
-Usage:
-    python scripts/monitor_training.py --metrics-dir ./fast_dev_checkpoints/run_*/metrics
-"""
-import argparse
+"""Real-time training monitor for Swin Mask R-CNN."""
 import json
-import time
+import argparse
 from pathlib import Path
 from datetime import datetime
-import sys
+import time
 import os
+import sys
+from typing import Dict, List, Optional
 
 
 def clear_screen():
@@ -22,120 +15,219 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 
-def format_time(seconds):
-    """Format seconds into human-readable time."""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
+def format_time_elapsed(seconds: int) -> str:
+    """Format elapsed time as HH:MM:SS."""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def load_latest_metrics(metrics_dir):
-    """Load the latest metrics from the export directory."""
-    latest_file = metrics_dir / "latest_metrics.json"
-    if latest_file.exists():
-        with open(latest_file) as f:
-            return json.load(f)
-    return None
+def format_eta(step: int, total_steps: int, elapsed: int) -> str:
+    """Calculate and format ETA."""
+    if step == 0:
+        return "N/A"
+    
+    steps_per_second = step / elapsed
+    remaining_steps = total_steps - step
+    eta_seconds = int(remaining_steps / steps_per_second)
+    
+    return format_time_elapsed(eta_seconds)
 
 
-def display_metrics(metrics, prev_metrics=None):
-    """Display metrics in a formatted way."""
-    clear_screen()
+def get_trend_symbol(trend: float) -> str:
+    """Get symbol for trend direction."""
+    if abs(trend) < 1e-6:
+        return "→"
+    elif trend > 0:
+        return "↑"
+    else:
+        return "↓"
+
+
+def display_metrics(metrics_path: Path, refresh_interval: int = 5):
+    """Display metrics with live updates."""
+    start_time = time.time()
     
-    print("=" * 80)
-    print(f"{'SWIN Mask R-CNN Training Monitor':^80}")
-    print("=" * 80)
-    print(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Step: {metrics['step']} | Time Elapsed: {format_time(metrics['training_speed']['time_elapsed'])}")
-    print(f"Training Speed: {metrics['training_speed']['steps_per_second']:.2f} steps/sec")
-    print()
-    
-    # Display moving averages
-    print("LOSS METRICS (Moving Averages)")
-    print("-" * 80)
-    print(f"{'Metric':<30} {'Current':>12} {'Average':>12} {'Std Dev':>12} {'Trend':>12}")
-    print("-" * 80)
-    
-    for key in sorted(metrics['moving_averages'].keys()):
-        stats = metrics['moving_averages'][key]
-        current = stats['current']
-        average = stats['average']
-        std = stats['std']
+    while True:
+        try:
+            # Load metrics
+            if not metrics_path.exists():
+                print(f"Waiting for metrics file: {metrics_path}")
+                time.sleep(refresh_interval)
+                continue
+            
+            with open(metrics_path, 'r') as f:
+                metrics_history = json.load(f)
+            
+            if not metrics_history:
+                print("No metrics available yet...")
+                time.sleep(refresh_interval)
+                continue
+            
+            # Get latest metrics
+            latest = metrics_history[-1]
+            
+            # Clear screen and display header
+            clear_screen()
+            elapsed = int(time.time() - start_time)
+            
+            print("=" * 80)
+            print(f"SWIN MASK R-CNN TRAINING MONITOR".center(80))
+            print(f"Elapsed: {format_time_elapsed(elapsed)} | Updated: {datetime.now().strftime('%H:%M:%S')}".center(80))
+            print("=" * 80)
+            
+            # Display basic info
+            step = latest.get('step', 0)
+            epoch = latest.get('epoch', 0)
+            
+            print(f"\nTraining Progress:")
+            print(f"  Step: {step:,}")
+            print(f"  Epoch: {epoch}")
+            
+            # Display losses with trends
+            print(f"\nLosses (with trends):")
+            loss_keys = ['train/loss', 'train/rpn_cls_loss', 'train/rpn_bbox_loss', 
+                        'train/roi_cls_loss', 'train/roi_bbox_loss', 'train/roi_mask_loss']
+            
+            for key in loss_keys:
+                if f'{key}_avg' in latest:
+                    avg = latest[f'{key}_avg']
+                    trend = latest.get(f'{key}_trend', 0)
+                    symbol = get_trend_symbol(trend)
+                    
+                    name = key.replace('train/', '').replace('_', ' ').title()
+                    print(f"  {name:<20}: {avg:>8.4f} {symbol} ({trend:+.4f})")
+            
+            # Display detection metrics
+            print(f"\nDetection Metrics:")
+            if 'train/total_predictions' in latest:
+                total_preds = latest.get('train/total_predictions', 0)
+                avg_preds = latest.get('train/avg_predictions_per_image', 0)
+                total_anns = latest.get('train/total_annotations', 0)
+                avg_anns = latest.get('train/avg_annotations_per_image', 0)
+                
+                print(f"  Predictions per batch: {total_preds}")
+                print(f"  Avg predictions/image: {avg_preds:.1f}")
+                print(f"  Annotations per batch: {total_anns}")
+                print(f"  Avg annotations/image: {avg_anns:.1f}")
+            
+            # Display quick evaluation results if available
+            quick_eval_keys = [k for k in latest.keys() if 'quick_eval/' in k]
+            if quick_eval_keys:
+                print(f"\nQuick Evaluation (last at step {step}):")
+                
+                total_quick_preds = latest.get('quick_eval/total_predictions', 0)
+                cats_detected = latest.get('quick_eval/categories_detected', 0)
+                
+                print(f"  Total predictions: {total_quick_preds}")
+                print(f"  Categories detected: {cats_detected}")
+                
+                # Show top categories
+                print(f"\n  Top Performing Categories:")
+                for i in range(5):
+                    count_key = f'quick_eval/top_{i}_cat_*_count'
+                    score_key = f'quick_eval/top_{i}_cat_*_avg_score'
+                    
+                    # Find matching keys
+                    count_keys = [k for k in latest.keys() if k.startswith(f'quick_eval/top_{i}_cat_') and k.endswith('_count')]
+                    score_keys = [k for k in latest.keys() if k.startswith(f'quick_eval/top_{i}_cat_') and k.endswith('_avg_score')]
+                    
+                    if count_keys and score_keys:
+                        cat_id = count_keys[0].split('_cat_')[1].split('_count')[0]
+                        count = latest.get(count_keys[0], 0)
+                        score = latest.get(score_keys[0], 0)
+                        print(f"    #{i+1} Category {cat_id}: {count} predictions, avg score {score:.3f}")
+            
+            # Display validation metrics if available
+            val_keys = [k for k in latest.keys() if 'val/' in k]
+            if val_keys:
+                print(f"\nValidation Metrics:")
+                if 'val/mAP' in latest:
+                    print(f"  mAP: {latest['val/mAP']:.4f}")
+                if 'val/mAP50' in latest:
+                    print(f"  mAP50: {latest['val/mAP50']:.4f}")
+                if 'val/top_10_classes_mAP' in latest:
+                    print(f"  Top 10 classes mAP: {latest['val/top_10_classes_mAP']:.4f}")
+                if 'val/bottom_10_classes_mAP' in latest:
+                    print(f"  Bottom 10 classes mAP: {latest['val/bottom_10_classes_mAP']:.4f}")
+                if 'val/ap_spread' in latest:
+                    print(f"  AP Spread: {latest['val/ap_spread']:.4f}")
+                
+                # Display per-class metrics if available
+                class_ap_keys = [k for k in latest.keys() if k.startswith('val/top_') and '_ap' in k and not k.endswith('_ap50')]
+                if class_ap_keys:
+                    print(f"\n  Top Performing Classes:")
+                    # Sort and display top classes
+                    for i in range(min(5, len(class_ap_keys))):
+                        key = f'val/top_{i}_'
+                        matching_keys = [k for k in latest.keys() if k.startswith(key) and k.endswith('_ap')]
+                        if matching_keys:
+                            full_key = matching_keys[0]
+                            # Extract class name from key
+                            class_name = full_key.replace(f'val/top_{i}_', '').replace('_ap', '')
+                            ap = latest.get(full_key, 0)
+                            ap50_key = full_key.replace('_ap', '_ap50')
+                            ap50 = latest.get(ap50_key, 0)
+                            print(f"    #{i+1} {class_name}: AP={ap:.3f}, AP50={ap50:.3f}")
+            
+            # Display system metrics
+            print(f"\nSystem Metrics:")
+            if 'train/memory_mb' in latest:
+                memory_mb = latest['train/memory_mb']
+                memory_gb = memory_mb / 1024
+                print(f"  GPU Memory: {memory_gb:.2f} GB ({memory_mb:.0f} MB)")
+            if 'train/gpu_utilization' in latest:
+                gpu_util = latest['train/gpu_utilization']
+                if gpu_util >= 0:
+                    print(f"  GPU Utilization: {gpu_util:.1f}%")
+            
+            # Display footer with hints
+            print("\n" + "-" * 80)
+            print(f"Refreshing every {refresh_interval}s | Press Ctrl+C to exit")
+            
+        except json.JSONDecodeError:
+            print("Error reading metrics file, retrying...")
+        except KeyboardInterrupt:
+            print("\nMonitoring stopped.")
+            break
+        except Exception as e:
+            print(f"Error: {e}")
         
-        # Calculate trend if we have previous metrics
-        trend = ""
-        if prev_metrics and key in prev_metrics.get('moving_averages', {}):
-            prev_avg = prev_metrics['moving_averages'][key]['average']
-            if prev_avg > 0:
-                change = (average - prev_avg) / prev_avg * 100
-                if abs(change) > 0.1:  # Only show significant changes
-                    trend = f"{change:+.1f}%"
-        
-        print(f"{key:<30} {current:>12.4f} {average:>12.4f} {std:>12.4f} {trend:>12}")
-    
-    # Display best metrics
-    print("\nBEST METRICS")
-    print("-" * 80)
-    for key, value in sorted(metrics['best_metrics'].items()):
-        print(f"{key:<30} {value:>12.4f}")
-    
-    # Display recent alerts
-    if metrics['recent_alerts']:
-        print("\nRECENT PERFORMANCE ALERTS")
-        print("-" * 80)
-        for alert in metrics['recent_alerts'][-5:]:  # Show last 5 alerts
-            print(f"Step {alert['step']}: {alert['metric']} increased by {alert['increase_pct']:.1f}%")
-    
-    print("\n" + "=" * 80)
-    print("Press Ctrl+C to exit")
-
-
-def monitor_loop(metrics_dir, refresh_interval=5):
-    """Main monitoring loop."""
-    prev_metrics = None
-    
-    try:
-        while True:
-            metrics = load_latest_metrics(metrics_dir)
-            
-            if metrics:
-                display_metrics(metrics, prev_metrics)
-                prev_metrics = metrics
-            else:
-                print(f"Waiting for metrics in {metrics_dir}...")
-            
-            time.sleep(refresh_interval)
-            
-    except KeyboardInterrupt:
-        print("\nMonitoring stopped.")
-        sys.exit(0)
+        time.sleep(refresh_interval)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Monitor SWIN Mask R-CNN training")
-    parser.add_argument(
-        "--metrics-dir",
-        type=Path,
-        required=True,
-        help="Path to metrics export directory"
-    )
-    parser.add_argument(
-        "--refresh",
-        type=int,
-        default=5,
-        help="Refresh interval in seconds (default: 5)"
-    )
+    parser = argparse.ArgumentParser(description="Monitor Swin Mask R-CNN training in real-time")
+    parser.add_argument('--metrics-dir', type=str, required=True,
+                       help='Path to metrics directory (e.g., ./checkpoints/run_*/metrics)')
+    parser.add_argument('--refresh', type=int, default=5,
+                       help='Refresh interval in seconds (default: 5)')
     
     args = parser.parse_args()
     
-    if not args.metrics_dir.exists():
-        print(f"Error: Metrics directory {args.metrics_dir} does not exist")
-        sys.exit(1)
+    # Find metrics.json file
+    metrics_dir = Path(args.metrics_dir)
     
-    print(f"Starting monitor for: {args.metrics_dir}")
-    monitor_loop(args.metrics_dir, args.refresh)
+    # Handle wildcards in path
+    if '*' in str(metrics_dir):
+        # Find matching directories
+        parent = metrics_dir.parent
+        pattern = metrics_dir.name
+        
+        matching_dirs = list(parent.glob(pattern))
+        if not matching_dirs:
+            print(f"No directories matching pattern: {metrics_dir}")
+            sys.exit(1)
+        
+        # Use the most recent one
+        metrics_dir = sorted(matching_dirs, key=lambda p: p.stat().st_mtime)[-1]
+    
+    metrics_path = metrics_dir / 'metrics.json'
+    
+    print(f"Monitoring metrics from: {metrics_path}")
+    display_metrics(metrics_path, args.refresh)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,20 +1,21 @@
 """Training script with PyTorch Lightning and TensorBoard integration."""
 import json
 from pathlib import Path
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
+from collections import defaultdict, deque
 
 import numpy as np
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Callback
 from pytorch_lightning.loggers import TensorBoardLogger
 from pycocotools import mask as maskUtils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from torch.optim import AdamW, SGD, Optimizer
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import time
 import csv
 from datetime import datetime
@@ -64,6 +65,92 @@ def get_gpu_utilization():
     return 0.0
 
 
+class MetricsTracker(Callback):
+    """Callback to track and export metrics for real-time monitoring."""
+    
+    def __init__(self, export_dir: Path, window_size: int = 100):
+        self.export_dir = Path(export_dir)
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+        self.window_size = window_size
+        
+        # Moving averages for losses
+        self.loss_windows = defaultdict(lambda: deque(maxlen=window_size))
+        self.metric_history = []
+        
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Track training metrics."""
+        if outputs is None:
+            return
+            
+        # Get logged metrics (use callback_metrics for more complete data)
+        metrics = trainer.callback_metrics
+        
+        # Update moving averages
+        for key, value in metrics.items():
+            if 'train/' in key and isinstance(value, (int, float)):
+                self.loss_windows[key].append(float(value))
+        
+        # Export current state
+        self._export_metrics(trainer, pl_module)
+        
+    def on_validation_end(self, trainer, pl_module):
+        """Track validation metrics."""
+        self._export_metrics(trainer, pl_module)
+    
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """Track validation metrics after epoch end (includes per-class metrics)."""
+        self._export_metrics(trainer, pl_module)
+        
+    def _export_metrics(self, trainer, pl_module):
+        """Export current metrics to JSON."""
+        current_metrics = {
+            'step': trainer.global_step,
+            'epoch': trainer.current_epoch,
+            'timestamp': datetime.now().isoformat(),
+        }
+        
+        # Add moving averages
+        for key, window in self.loss_windows.items():
+            if len(window) > 0:
+                current_metrics[f'{key}_avg'] = np.mean(list(window))
+                current_metrics[f'{key}_std'] = np.std(list(window))
+                
+                # Calculate trend (positive = increasing, negative = decreasing)
+                if len(window) >= 10:
+                    recent = list(window)[-10:]
+                    older = list(window)[-20:-10] if len(window) >= 20 else list(window)[:10]
+                    trend = np.mean(recent) - np.mean(older)
+                    current_metrics[f'{key}_trend'] = trend
+        
+        # Add current logged metrics (use callback_metrics for more complete data)
+        for key, value in trainer.callback_metrics.items():
+            if isinstance(value, (int, float)):
+                current_metrics[key] = float(value)
+        
+        # Add class-level metrics from the module if available
+        if hasattr(trainer.lightning_module, 'latest_class_metrics'):
+            for key, value in trainer.lightning_module.latest_class_metrics.items():
+                if isinstance(value, (int, float)):
+                    current_metrics[key] = float(value)
+        
+        # Add quick eval metrics from the module if available
+        if hasattr(trainer.lightning_module, 'latest_quick_eval_metrics'):
+            for key, value in trainer.lightning_module.latest_quick_eval_metrics.items():
+                if isinstance(value, (int, float)):
+                    current_metrics[key] = float(value)
+        
+        # Save to file
+        metrics_file = self.export_dir / 'metrics.json'
+        self.metric_history.append(current_metrics)
+        
+        # Keep only last 1000 entries to prevent file from growing too large
+        if len(self.metric_history) > 1000:
+            self.metric_history = self.metric_history[-1000:]
+            
+        with open(metrics_file, 'w') as f:
+            json.dump(self.metric_history, f, indent=2)
+
+
 class MaskRCNNLightningModule(pl.LightningModule):
     """PyTorch Lightning Module for SWIN-based Mask R-CNN."""
     
@@ -85,6 +172,8 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Class-level metrics tracking
         self.class_predictions_buffer = {}
         self.class_metrics_history = []
+        self.latest_class_metrics = {}  # Store latest class metrics for export
+        self.latest_quick_eval_metrics = {}  # Store latest quick eval metrics
         
         # Initialize model
         self.model = SwinMaskRCNN(
@@ -146,9 +235,17 @@ class MaskRCNNLightningModule(pl.LightningModule):
         # Validation predictions storage
         self.validation_outputs = []
         
-        # Quick evaluation state
-        self.quick_eval_outputs = []
+        # Quick evaluation setup
+        self.quick_eval_enabled = config.quick_eval_enabled if hasattr(config, 'quick_eval_enabled') else False
+        self.quick_eval_interval = config.quick_eval_interval if hasattr(config, 'quick_eval_interval') else 50
+        self.quick_eval_samples = config.quick_eval_samples if hasattr(config, 'quick_eval_samples') else 50
+        self.track_top_k_classes = config.track_top_k_classes if hasattr(config, 'track_top_k_classes') else 10
         self.last_quick_eval_step = 0
+        self.quick_eval_outputs = []
+        
+        # Class performance tracking
+        self.class_performance = defaultdict(lambda: {'predictions': 0, 'correct': 0, 'total_gt': 0})
+        self.recent_class_aps = defaultdict(list)  # Track recent APs for each class
         
         # Loss weights - adjust to help with detection stability
         self.loss_weights = {
@@ -312,11 +409,16 @@ class MaskRCNNLightningModule(pl.LightningModule):
         if not hasattr(self, 'quick_eval_loader'):
             # Create a small subset loader for quick evaluation
             from torch.utils.data import Subset, DataLoader
+            from swin_maskrcnn.data.dataset import CocoDataset
+            from swin_maskrcnn.data.transforms_simple import get_transform_simple
             
-            # Get validation dataset from trainer
-            val_dataset = self.trainer.datamodule.val_dataset if hasattr(self.trainer, 'datamodule') else None
-            if val_dataset is None:
-                return
+            # Create a small validation dataset
+            val_dataset = CocoDataset(
+                root_dir=str(self.config.img_root),
+                annotation_file=str(self.config.val_ann),
+                transforms=get_transform_simple(train=False),
+                mode='train'  # Still use train mode to get targets
+            )
                 
             # Create subset
             indices = list(range(min(self.quick_eval_samples, len(val_dataset))))
@@ -378,17 +480,30 @@ class MaskRCNNLightningModule(pl.LightningModule):
                            reverse=True)
         
         # Log quick metrics
+        self.latest_quick_eval_metrics = {}  # Reset quick eval metrics
+        
         for idx, (cat_id, scores) in enumerate(sorted_cats[:self.track_top_k_classes]):
-            self.log(f'quick_eval/top_{idx}_cat_{cat_id}_count', len(scores), 
+            count_key = f'quick_eval/top_{idx}_cat_{cat_id}_count'
+            score_key = f'quick_eval/top_{idx}_cat_{cat_id}_avg_score'
+            
+            self.log(count_key, len(scores), 
                     on_step=True, batch_size=self.config.train_batch_size)
-            self.log(f'quick_eval/top_{idx}_cat_{cat_id}_avg_score', np.mean(scores), 
+            self.log(score_key, np.mean(scores), 
                     on_step=True, batch_size=self.config.train_batch_size)
+            
+            # Store for export
+            self.latest_quick_eval_metrics[count_key] = len(scores)
+            self.latest_quick_eval_metrics[score_key] = float(np.mean(scores))
         
         total_quick_preds = len(quick_predictions)
         self.log('quick_eval/total_predictions', total_quick_preds, 
                 on_step=True, prog_bar=True, batch_size=self.config.train_batch_size)
         self.log('quick_eval/categories_detected', len(cat_predictions), 
                 on_step=True, batch_size=self.config.train_batch_size)
+        
+        # Store for export
+        self.latest_quick_eval_metrics['quick_eval/total_predictions'] = total_quick_preds
+        self.latest_quick_eval_metrics['quick_eval/categories_detected'] = len(cat_predictions)
     
     def log_error_to_csv(self, epoch: int, batch_idx: int, error_info: Dict, targets: list):
         """Log error information to CSV file."""
@@ -729,6 +844,51 @@ class MaskRCNNLightningModule(pl.LightningModule):
             self.log('val/top_10_classes_mAP', top_10_ap, on_epoch=True, sync_dist=True)
             self.log('val/bottom_10_classes_mAP', bottom_10_ap, on_epoch=True, sync_dist=True)
             self.log('val/ap_spread', top_10_ap - bottom_10_ap, on_epoch=True, sync_dist=True)
+            
+            # Store class metrics for export
+            self.latest_class_metrics = {
+                'val/top_10_classes_mAP': top_10_ap,
+                'val/bottom_10_classes_mAP': bottom_10_ap,
+                'val/ap_spread': top_10_ap - bottom_10_ap
+            }
+            
+            # Add per-class metrics to storage
+            for idx, (cat_id, metrics_dict) in enumerate(sorted_classes[:self.track_top_k_classes]):
+                self.latest_class_metrics[f'val/top_{idx}_{metrics_dict["name"]}_ap'] = metrics_dict['ap']
+                self.latest_class_metrics[f'val/top_{idx}_{metrics_dict["name"]}_ap50'] = metrics_dict['ap50']
+            
+            # Save detailed class metrics to JSON for external monitoring
+            class_metrics_file = Path(f'class_metrics_epoch_{self.current_epoch}_step_{self.global_step}.json')
+            class_metrics_export = {
+                'epoch': self.current_epoch,
+                'step': self.global_step,
+                'timestamp': datetime.now().isoformat(),
+                'overall_metrics': {
+                    'mAP': metrics['mAP'],
+                    'mAP50': metrics['mAP50'],
+                    'classes_with_predictions': classes_with_predictions,
+                    'classes_with_ap': classes_with_ap,
+                    'total_classes': len(class_metrics)
+                },
+                'per_class_metrics': class_metrics,
+                'sorted_by_ap': [
+                    {
+                        'rank': idx + 1,
+                        'cat_id': cat_id,
+                        'name': m['name'],
+                        'ap': m['ap'],
+                        'ap50': m['ap50'],
+                        'num_predictions': m['num_predictions'],
+                        'num_gt': m['num_gt'],
+                        'recall': m['num_predictions'] / max(1, m['num_gt'])
+                    }
+                    for idx, (cat_id, m) in enumerate(sorted_classes)
+                ]
+            }
+            
+            with open(class_metrics_file, 'w') as f:
+                json.dump(class_metrics_export, f, indent=2)
+            print(f"Saved detailed class metrics to: {class_metrics_file}")
         
         # Log metrics to TensorBoard
         # Important: log mAP first and sync across all GPUs
@@ -873,12 +1033,8 @@ def main(config_path: Optional[str] = None):
             save_weights=True
         ),
         MetricsTracker(
-            window_size=100,
-            export_interval=50,
             export_dir=run_dir / "metrics",
-            alert_threshold=0.2,
-            track_classes=True,
-            top_k_classes=config.track_top_k_classes if hasattr(config, 'track_top_k_classes') else 10
+            window_size=100
         )
     ]
     
