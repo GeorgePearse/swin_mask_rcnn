@@ -167,8 +167,8 @@ def load_coco_weights(model: nn.Module, num_classes: int = 70, strict: bool = Fa
                 new_cls_weight[i] = coco_cls_weight[i]
             
             # Set biases to encourage detection
-            new_cls_bias[0] = 0.0  # Neutral background
-            new_cls_bias[1:] = -1.0  # Negative bias for foreground to encourage detection
+            new_cls_bias[0] = -2.0  # Negative background bias to reduce false negatives
+            new_cls_bias[1:] = 0.01  # Slightly positive bias for foreground to encourage detection
             
             # Scale weights if they're too small
             weight_norm = new_cls_weight[1:].norm(dim=1).mean()

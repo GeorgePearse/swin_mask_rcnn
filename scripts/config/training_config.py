@@ -113,5 +113,23 @@ class TrainingConfig(BaseModel):
         default=None,
         description="Maximum number of validation images to process (None for all)"
     )
+    
+    # Quick evaluation settings for fast feedback
+    quick_eval_enabled: bool = Field(
+        default=False,
+        description="Enable quick evaluation during training for fast feedback"
+    )
+    quick_eval_interval: int = Field(
+        default=50,
+        description="Number of training steps between quick evaluations"
+    )
+    quick_eval_samples: int = Field(
+        default=50,
+        description="Number of validation samples to use for quick evaluation"
+    )
+    track_top_k_classes: int = Field(
+        default=10,
+        description="Number of top/bottom classes to track in detail"
+    )
 
     model_config = ConfigDict(validate_assignment=True)

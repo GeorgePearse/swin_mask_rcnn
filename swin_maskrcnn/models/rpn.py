@@ -110,7 +110,8 @@ class RPNHead(nn.Module):
         nn.init.constant_(self.rpn_conv.bias, 0)
         # Initialize cls bias with focal loss-style initialization
         # This helps with the foreground/background imbalance
-        pi = 0.01  # probability of foreground
+        # Use a less extreme value to encourage initial proposals
+        pi = 0.1  # probability of foreground (increased from 0.01 for better initial proposals)
         bias_value = -torch.log(torch.tensor(pi / (1 - pi))).item()
         nn.init.constant_(self.rpn_cls.bias, bias_value)
         nn.init.constant_(self.rpn_reg.bias, 0)

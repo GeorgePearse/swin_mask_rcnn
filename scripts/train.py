@@ -27,7 +27,7 @@ from scripts.config import TrainingConfig
 from swin_maskrcnn.utils.pretrained_loader import load_pretrained_from_url
 from swin_maskrcnn.utils.logging import setup_logger
 from swin_maskrcnn.utils.load_coco_weights import load_coco_weights
-from swin_maskrcnn.callbacks import ONNXExportCallback
+from swin_maskrcnn.callbacks import ONNXExportCallback, MetricsTracker
 
 
 def get_gpu_memory_mb():
@@ -75,6 +75,16 @@ class MaskRCNNLightningModule(pl.LightningModule):
         super().__init__()
         self.config = config
         self.val_coco = val_coco
+        
+        # Quick eval settings
+        self.quick_eval_enabled = getattr(config, 'quick_eval_enabled', False)
+        self.quick_eval_interval = getattr(config, 'quick_eval_interval', 50)
+        self.quick_eval_samples = getattr(config, 'quick_eval_samples', 50)
+        self.track_top_k_classes = getattr(config, 'track_top_k_classes', 10)
+        
+        # Class-level metrics tracking
+        self.class_predictions_buffer = {}
+        self.class_metrics_history = []
         
         # Initialize model
         self.model = SwinMaskRCNN(
@@ -135,6 +145,10 @@ class MaskRCNNLightningModule(pl.LightningModule):
         
         # Validation predictions storage
         self.validation_outputs = []
+        
+        # Quick evaluation state
+        self.quick_eval_outputs = []
+        self.last_quick_eval_step = 0
         
         # Loss weights - adjust to help with detection stability
         self.loss_weights = {
@@ -275,6 +289,11 @@ class MaskRCNNLightningModule(pl.LightningModule):
             self.log('train/memory_mb', memory_mb, on_step=True, on_epoch=False, batch_size=batch_size)
             self.log('train/gpu_utilization', gpu_util, on_step=True, on_epoch=False, batch_size=batch_size)
             
+            # Run quick evaluation if enabled
+            if self.quick_eval_enabled and (self.global_step - self.last_quick_eval_step) >= self.quick_eval_interval:
+                self._run_quick_evaluation()
+                self.last_quick_eval_step = self.global_step
+            
             return total_loss
             
         except Exception as e:
@@ -287,6 +306,89 @@ class MaskRCNNLightningModule(pl.LightningModule):
             # Skip this batch
             print(f"Skipping batch {batch_idx} due to error: {e}")
             return None
+    
+    def _run_quick_evaluation(self):
+        """Run a quick evaluation on a subset of validation data for fast feedback."""
+        if not hasattr(self, 'quick_eval_loader'):
+            # Create a small subset loader for quick evaluation
+            from torch.utils.data import Subset, DataLoader
+            
+            # Get validation dataset from trainer
+            val_dataset = self.trainer.datamodule.val_dataset if hasattr(self.trainer, 'datamodule') else None
+            if val_dataset is None:
+                return
+                
+            # Create subset
+            indices = list(range(min(self.quick_eval_samples, len(val_dataset))))
+            quick_dataset = Subset(val_dataset, indices)
+            
+            self.quick_eval_loader = DataLoader(
+                quick_dataset,
+                batch_size=self.config.val_batch_size,
+                shuffle=False,
+                num_workers=0,  # Use 0 workers for speed
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+        
+        # Run quick evaluation
+        self.eval()
+        quick_predictions = []
+        
+        with torch.no_grad():
+            for batch_idx, (images, targets) in enumerate(self.quick_eval_loader):
+                if batch_idx >= 5:  # Limit batches for speed
+                    break
+                    
+                images = [img.to(self.device) for img in images]
+                outputs = self.forward(images)
+                
+                # Process predictions
+                for i, output in enumerate(outputs):
+                    if len(output.get('boxes', [])) == 0:
+                        continue
+                        
+                    image_id = targets[i]['image_id'].item()
+                    
+                    for box, label, score in zip(
+                        output['boxes'].cpu().numpy(),
+                        output['labels'].cpu().numpy(),
+                        output['scores'].cpu().numpy()
+                    ):
+                        if score > 0.05:  # Higher threshold for quick eval
+                            quick_predictions.append({
+                                'image_id': int(image_id),
+                                'category_id': int(label),
+                                'score': float(score)
+                            })
+        
+        self.train()
+        
+        # Compute quick metrics by category
+        cat_predictions = {}
+        for pred in quick_predictions:
+            cat_id = pred['category_id']
+            if cat_id not in cat_predictions:
+                cat_predictions[cat_id] = []
+            cat_predictions[cat_id].append(pred['score'])
+        
+        # Log top performing categories
+        sorted_cats = sorted(cat_predictions.items(), 
+                           key=lambda x: (len(x[1]), np.mean(x[1])), 
+                           reverse=True)
+        
+        # Log quick metrics
+        for idx, (cat_id, scores) in enumerate(sorted_cats[:self.track_top_k_classes]):
+            self.log(f'quick_eval/top_{idx}_cat_{cat_id}_count', len(scores), 
+                    on_step=True, batch_size=self.config.train_batch_size)
+            self.log(f'quick_eval/top_{idx}_cat_{cat_id}_avg_score', np.mean(scores), 
+                    on_step=True, batch_size=self.config.train_batch_size)
+        
+        total_quick_preds = len(quick_predictions)
+        self.log('quick_eval/total_predictions', total_quick_preds, 
+                on_step=True, prog_bar=True, batch_size=self.config.train_batch_size)
+        self.log('quick_eval/categories_detected', len(cat_predictions), 
+                on_step=True, batch_size=self.config.train_batch_size)
     
     def log_error_to_csv(self, epoch: int, batch_idx: int, error_info: Dict, targets: list):
         """Log error information to CSV file."""
@@ -513,6 +615,120 @@ class MaskRCNNLightningModule(pl.LightningModule):
                 })
             except Exception as e:
                 print(f"Segmentation evaluation failed: {e}")
+            
+            # Compute per-class metrics with enhanced display
+            print("\n" + "="*80)
+            print(f"PER-CLASS METRICS (Detection - AP@0.5:0.95) - Epoch {self.current_epoch}, Step {self.global_step}")
+            print("="*80)
+            
+            # Get category info
+            cat_ids = self.val_coco.getCatIds()
+            cat_names = {cat['id']: cat['name'] for cat in self.val_coco.loadCats(cat_ids)}
+            
+            # Compute per-class AP for detection
+            class_metrics = {}
+            for cat_id in cat_ids:
+                # Filter predictions for this category
+                cat_predictions = [p for p in predictions if p['category_id'] == cat_id]
+                
+                if not cat_predictions:
+                    class_metrics[cat_id] = {
+                        'name': cat_names[cat_id],
+                        'ap': 0.0,
+                        'ap50': 0.0,
+                        'num_predictions': 0,
+                        'num_gt': len(self.val_coco.getAnnIds(catIds=[cat_id]))
+                    }
+                else:
+                    # Create temporary prediction file for this category
+                    temp_pred_file = Path(f'temp_cat_{cat_id}_predictions.json')
+                    with open(temp_pred_file, 'w') as f:
+                        json.dump(cat_predictions, f)
+                    
+                    try:
+                        # Load predictions for this category
+                        coco_dt_cat = self.val_coco.loadRes(str(temp_pred_file))
+                        
+                        # Run evaluation for this category only
+                        coco_eval_cat = COCOeval(self.val_coco, coco_dt_cat, 'bbox')
+                        coco_eval_cat.params.catIds = [cat_id]
+                        coco_eval_cat.evaluate()
+                        coco_eval_cat.accumulate()
+                        coco_eval_cat.summarize()
+                        
+                        class_metrics[cat_id] = {
+                            'name': cat_names[cat_id],
+                            'ap': coco_eval_cat.stats[0],
+                            'ap50': coco_eval_cat.stats[1],
+                            'num_predictions': len(cat_predictions),
+                            'num_gt': len(self.val_coco.getAnnIds(catIds=[cat_id]))
+                        }
+                        
+                        # Clean up temp file
+                        temp_pred_file.unlink(missing_ok=True)
+                    except Exception as e:
+                        print(f"Error computing metrics for category {cat_names[cat_id]}: {e}")
+                        class_metrics[cat_id] = {
+                            'name': cat_names[cat_id],
+                            'ap': 0.0,
+                            'ap50': 0.0,
+                            'num_predictions': len(cat_predictions),
+                            'num_gt': len(self.val_coco.getAnnIds(catIds=[cat_id]))
+                        }
+            
+            # Sort by AP score and print with enhanced formatting
+            sorted_classes = sorted(class_metrics.items(), key=lambda x: x[1]['ap'], reverse=True)
+            
+            # Print top performing classes first
+            print(f"\n{'TOP PERFORMING CLASSES':^62}")
+            print(f"{'Class Name':<30} {'AP':>8} {'AP50':>8} {'Preds':>8} {'GT':>8} {'Recall':>8}")
+            print("-" * 70)
+            
+            top_k = min(10, len(sorted_classes))
+            for cat_id, metrics_dict in sorted_classes[:top_k]:
+                recall = metrics_dict['num_predictions'] / max(1, metrics_dict['num_gt'])
+                print(f"{metrics_dict['name']:<30} {metrics_dict['ap']:>8.4f} {metrics_dict['ap50']:>8.4f} "
+                      f"{metrics_dict['num_predictions']:>8} {metrics_dict['num_gt']:>8} {recall:>8.2f}")
+            
+            # Print struggling classes
+            print(f"\n{'CLASSES NEEDING ATTENTION':^62}")
+            print(f"{'Class Name':<30} {'AP':>8} {'AP50':>8} {'Preds':>8} {'GT':>8} {'Recall':>8}")
+            print("-" * 70)
+            
+            # Show bottom performing classes with GT annotations
+            bottom_classes = [x for x in sorted_classes if x[1]['num_gt'] > 0][-10:]
+            for cat_id, metrics_dict in bottom_classes:
+                recall = metrics_dict['num_predictions'] / max(1, metrics_dict['num_gt'])
+                print(f"{metrics_dict['name']:<30} {metrics_dict['ap']:>8.4f} {metrics_dict['ap50']:>8.4f} "
+                      f"{metrics_dict['num_predictions']:>8} {metrics_dict['num_gt']:>8} {recall:>8.2f}")
+            
+            # Print summary statistics
+            print("-" * 62)
+            classes_with_predictions = sum(1 for m in class_metrics.values() if m['num_predictions'] > 0)
+            classes_with_ap = sum(1 for m in class_metrics.values() if m['ap'] > 0.0)
+            avg_ap_all = np.mean([m['ap'] for m in class_metrics.values()])
+            avg_ap50_all = np.mean([m['ap50'] for m in class_metrics.values()])
+            
+            print(f"Classes with predictions: {classes_with_predictions}/{len(class_metrics)}")
+            print(f"Classes with AP > 0: {classes_with_ap}/{len(class_metrics)}")
+            print(f"Average AP (all classes): {avg_ap_all:.4f}")
+            print(f"Average AP50 (all classes): {avg_ap50_all:.4f}")
+            print("="*80 + "\n")
+            
+            # Log per-class metrics to TensorBoard (only top/bottom K to avoid clutter)
+            for idx, (cat_id, metrics_dict) in enumerate(sorted_classes[:self.track_top_k_classes]):
+                self.log(f'val/top_{idx}_{metrics_dict["name"]}_ap', metrics_dict['ap'], 
+                        on_epoch=True, sync_dist=True)
+                self.log(f'val/top_{idx}_{metrics_dict["name"]}_ap50', metrics_dict['ap50'], 
+                        on_epoch=True, sync_dist=True)
+                
+            # Log aggregate metrics by performance tier
+            top_10_ap = np.mean([m[1]['ap'] for m in sorted_classes[:10]])
+            bottom_10_ap = np.mean([m[1]['ap'] for m in sorted_classes[-10:] if m[1]['num_gt'] > 0])
+            
+            self.log('val/top_10_classes_mAP', top_10_ap, on_epoch=True, sync_dist=True)
+            self.log('val/bottom_10_classes_mAP', bottom_10_ap, on_epoch=True, sync_dist=True)
+            self.log('val/ap_spread', top_10_ap - bottom_10_ap, on_epoch=True, sync_dist=True)
         
         # Log metrics to TensorBoard
         # Important: log mAP first and sync across all GPUs
@@ -655,6 +871,14 @@ def main(config_path: Optional[str] = None):
             export_dir=run_dir,
             export_backbone_only=True,
             save_weights=True
+        ),
+        MetricsTracker(
+            window_size=100,
+            export_interval=50,
+            export_dir=run_dir / "metrics",
+            alert_threshold=0.2,
+            track_classes=True,
+            top_k_classes=config.track_top_k_classes if hasattr(config, 'track_top_k_classes') else 10
         )
     ]
     
