@@ -1,3 +1,5 @@
+**WARNING: I was just messing around with claude-code to see how far I could get with this, going to get through it over a weekend at some point I'm sure.**
+
 # SWIN Mask R-CNN
 
 A clean, standalone implementation of SWIN-based Mask R-CNN without dependencies on mmcv, mmengine, or mmdetection packages. This implementation provides a modular, easy-to-understand codebase for instance segmentation tasks.
